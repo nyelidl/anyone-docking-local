@@ -1,6 +1,6 @@
 # <img src="https://raw.githubusercontent.com/nyelidl/anyone-docking/main/any-L.svg" width="32"> nyone can dock, everyone can do!
 
-**Anyone docking: Browser-based molecular docking — no installation required.**
+**Anyone docking: Browser-based molecular docking — Run locally!**
 
 [![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://nyelidl.github.io/anyone-docking/)
 
