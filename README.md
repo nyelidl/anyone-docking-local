@@ -12,6 +12,58 @@ Batch docking with 4 docking engines: [![Open In Colab](https://colab.research.g
 
 ---
 
+## 🖥️ Run locally
+
+### Linux (Ubuntu / Debian)
+```bash
+sudo apt install python3.11 python3.11-venv openbabel libcairo2-dev libpangocairo-1.0-0 && \
+git clone https://github.com/nyelidl/anyone-docking-local.git && \
+cd anyone-docking-local && \
+python3.11 -m venv venv && \
+source venv/bin/activate && \
+pip install -r requirements.txt && \
+streamlit run app.py
+```
+
+### macOS
+```bash
+brew install python@3.11 open-babel cairo pango && \
+git clone https://github.com/nyelidl/anyone-docking-local.git && \
+cd anyone-docking-local && \
+python3.11 -m venv venv && \
+source venv/bin/activate && \
+pip install -r requirements.txt && \
+streamlit run app.py
+```
+
+> **Apple Silicon (M1/M2/M3/M4):** Fully supported — the app auto-downloads the correct `aarch64` Vina binary.
+
+### Windows
+
+> **Recommended:** Use [WSL2](https://learn.microsoft.com/en-us/windows/wsl/) with Ubuntu and follow the Linux instructions above — it's the simplest and most reliable path.
+
+For native Windows, install dependencies manually first:
+1. **OpenBabel** — download the installer from [openbabel.org](https://openbabel.org/wiki/Category:Installation) and add it to PATH
+2. **Cairo & Pango** — easiest via conda: `conda install -c conda-forge cairo pango`
+
+Then:
+```bash
+git clone https://github.com/nyelidl/anyone-docking-local.git && \
+cd anyone-docking-local && \
+python -m venv venv && \
+venv\Scripts\activate && \
+pip install -r requirements.txt && \
+streamlit run app.py
+```
+
+### All platforms
+
+- Python 3.10+ required
+- AutoDock Vina 1.2.7 binary is **downloaded automatically** on first launch (Linux, macOS Intel/ARM, Windows)
+- The app auto-detects your OS and CPU architecture
+
+---
+
 ## ✨ What it does
 
 | | |
@@ -92,56 +144,6 @@ Available in **both single and batch** docking modes:
 | **Redocking browser** | Reference ligand poses · crystal overlay · RMSD per pose |
 
 ---
-
-## 🖥️ Run locally
-
-### Linux (Ubuntu / Debian)
-```bash
-sudo apt install python3.11 python3.11-venv openbabel libcairo2-dev libpangocairo-1.0-0 && \
-git clone https://github.com/nyelidl/anyone-docking-local.git && \
-cd anyone-docking-local && \
-python3.11 -m venv venv && \
-source venv/bin/activate && \
-pip install -r requirements.txt && \
-streamlit run app.py
-```
-
-### macOS
-```bash
-brew install python@3.11 open-babel cairo pango && \
-git clone https://github.com/nyelidl/anyone-docking-local.git && \
-cd anyone-docking-local && \
-python3.11 -m venv venv && \
-source venv/bin/activate && \
-pip install -r requirements.txt && \
-streamlit run app.py
-```
-
-> **Apple Silicon (M1/M2/M3/M4):** Fully supported — the app auto-downloads the correct `aarch64` Vina binary.
-
-### Windows
-
-> **Recommended:** Use [WSL2](https://learn.microsoft.com/en-us/windows/wsl/) with Ubuntu and follow the Linux instructions above — it's the simplest and most reliable path.
-
-For native Windows, install dependencies manually first:
-1. **OpenBabel** — download the installer from [openbabel.org](https://openbabel.org/wiki/Category:Installation) and add it to PATH
-2. **Cairo & Pango** — easiest via conda: `conda install -c conda-forge cairo pango`
-
-Then:
-```bash
-git clone https://github.com/nyelidl/anyone-docking-local.git && \
-cd anyone-docking-local && \
-python -m venv venv && \
-venv\Scripts\activate && \
-pip install -r requirements.txt && \
-streamlit run app.py
-```
-
-### All platforms
-
-- Python 3.10+ required
-- AutoDock Vina 1.2.7 binary is **downloaded automatically** on first launch (Linux, macOS Intel/ARM, Windows)
-- The app auto-detects your OS and CPU architecture
 
 ### Optional: CIF support
 
