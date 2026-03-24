@@ -1221,7 +1221,7 @@ st.markdown(
 st.markdown(
     "**Basic** — single ligand. **Batch** — multiple ligands.")
 st.markdown(
-    "**☁️ Cloud-ready | 📱 Mobile-compatible**"
+    "**💻 Here, run locally on your machine! 🖥️**"
 )
 
 if VINA_PATH is None:
