@@ -243,10 +243,10 @@ def get_vina_binary(path: str = ""):
     if system == "linux":
         _FNAME = "vina_1.2.7_linux_x86_64"
     elif system == "darwin":
-        if machine in ("arm64", "aarch64"):
-            _FNAME = "vina_1.2.7_mac_arm64"
-        else:
-            _FNAME = "vina_1.2.7_mac_x86_64"
+        # GitHub releases use "aarch64" for Apple Silicon (not "arm64")
+        _FNAME = ("vina_1.2.7_mac_aarch64"
+                  if machine in ("arm64", "aarch64")
+                  else "vina_1.2.7_mac_x86_64")
     elif system == "windows":
         _FNAME = "vina_1.2.7_windows_x86_64.exe"
     else:
@@ -257,20 +257,31 @@ def get_vina_binary(path: str = ""):
     if not path:
         path = os.path.join(tempfile.gettempdir(), _FNAME)
 
+    def _download(url, dest):
+        """Download with requests (follows GitHub → S3 redirects reliably)."""
+        import requests as _rq
+        r = _rq.get(url, stream=True, timeout=120, allow_redirects=True)
+        r.raise_for_status()
+        with open(dest, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1 << 20):
+                f.write(chunk)
+
     if not os.path.exists(path) or os.path.getsize(path) < 100_000:
         try:
-            import urllib.request
-            urllib.request.urlretrieve(_URL, path)
+            _download(_URL, path)
         except Exception as e1:
-            try:
-                import requests
-                r = requests.get(_URL, stream=True, timeout=120)
-                r.raise_for_status()
-                with open(path, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=1024 * 1024):
-                        f.write(chunk)
-            except Exception as e2:
-                return None, f"Download failed: {e1} / {e2}"
+            # Apple Silicon fallback: x86_64 runs fine under Rosetta 2
+            if system == "darwin" and machine in ("arm64", "aarch64"):
+                _FNAME2 = "vina_1.2.7_mac_x86_64"
+                path2   = os.path.join(tempfile.gettempdir(), _FNAME2)
+                try:
+                    _download(_BASE + _FNAME2, path2)
+                    path = path2
+                except Exception as e2:
+                    return None, f"Download failed: {e1} / x86_64 fallback: {e2}"
+            else:
+                return None, f"Download failed: {e1}"
+
     if system != "windows":
         os.chmod(path, 0o755)
     return path, f"ok ({system}/{machine})"
