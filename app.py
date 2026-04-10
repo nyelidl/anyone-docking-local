@@ -85,10 +85,8 @@ def _render_interactive_diagram(data: dict, height: int = 800) -> str:
     lig_svg = data["ligand_svg"]
     placements = data["placements"]
 
-    # Escape title for JS
     title_esc = title.replace("\\", "\\\\").replace('"', '\\"').replace("'", "\\'")
 
-    # Title pill dimensions
     tw = min(len(title) * 14 + 48, W - 40)
     pill_x = (W - tw) / 2
 
@@ -103,7 +101,6 @@ def _render_interactive_diagram(data: dict, height: int = 800) -> str:
         "halogen":          {"fill": "#ffb0d0", "stroke": "#cc2277", "lineclr": "#cc2277", "dash": "5 2",       "lw": "1.6"},
     }
 
-    # Legend items (only active types)
     active_types = list(dict.fromkeys(p["itype"] for p in placements))
     LEG_LABEL = {
         "hbond": "H-bond", "hbond_to_halogen": "H···Halogen",
@@ -122,7 +119,6 @@ def _render_interactive_diagram(data: dict, height: int = 800) -> str:
             "dash":    cfg["dash"],
         })
 
-    # Legend SVG (static, at bottom)
     LEG_Y = H - 45
     leg_entry_w = 115
     leg_total = len(legend_items) * leg_entry_w
@@ -161,8 +157,6 @@ def _render_interactive_diagram(data: dict, height: int = 800) -> str:
     html = f"""
 <div style="font-family:Arial,sans-serif;background:white;border-radius:8px;
             border:1px solid #e0e0e0;overflow:hidden;">
-
-  <!-- Toolbar -->
   <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;
               border-bottom:1px solid #eee;flex-wrap:wrap;background:#fafafa;">
     <span style="font-size:12px;color:#555;flex:1;">
@@ -193,32 +187,18 @@ def _render_interactive_diagram(data: dict, height: int = 800) -> str:
       <option value="4">600 dpi (4×)</option>
     </select>
   </div>
-
-  <!-- SVG canvas -->
   <svg id="iac-svg" viewBox="0 0 {W} {H}"
        style="width:100%;display:block;cursor:default;user-select:none;">
-
     <rect width="{W}" height="{H}" fill="white"/>
-
-    <!-- Title pill -->
     <rect x="{pill_x:.1f}" y="12" width="{tw:.0f}" height="44"
           rx="22" ry="22" fill="#f2f2f2" stroke="none"/>
     <text x="{W/2:.1f}" y="34" text-anchor="middle" dominant-baseline="central"
           font-family="Arial,sans-serif" font-size="20" font-weight="700"
           fill="#1a1a1a">{title}</text>
-
-    <!-- Interaction lines (updated by JS) -->
     <g id="iac-lines"></g>
-
-    <!-- Ligand structure (static) -->
     <g id="iac-ligand">{lig_svg}</g>
-
-    <!-- Residue circles (draggable, added by JS) -->
     <g id="iac-residues"></g>
-
-    <!-- Legend (static) -->
     <g id="iac-legend">{legend_svg}</g>
-
   </svg>
 </div>
 
@@ -231,11 +211,9 @@ def _render_interactive_diagram(data: dict, height: int = 800) -> str:
   const linesG   = document.getElementById("iac-lines");
   const residuesG= document.getElementById("iac-residues");
 
-  // Current positions (mutable)
   const pos = {{}};
   PLACEMENTS.forEach(p => {{ pos[p.id] = {{ x: p.bx, y: p.by }}; }});
 
-  // DOM element caches
   const els = {{}};
 
   function SVG(tag, attrs) {{
@@ -263,7 +241,6 @@ def _render_interactive_diagram(data: dict, height: int = 800) -> str:
                        circ: null, txt: null }};
       els[p.id] = cache;
 
-      // — LINE (non-hydrophobic only) —
       if (cfg.lineclr) {{
         const line = SVG("line", {{
           x1: p.lx, y1: p.ly,
@@ -276,7 +253,6 @@ def _render_interactive_diagram(data: dict, height: int = 800) -> str:
         linesG.appendChild(line);
         cache.line = line;
 
-        // Distance label
         if (p.distance != null) {{
           const ds  = p.distance + "\u00c5";
           const tw2 = ds.length * 7 + 8;
@@ -296,7 +272,6 @@ def _render_interactive_diagram(data: dict, height: int = 800) -> str:
         }}
       }}
 
-      // — RESIDUE CIRCLE + LABEL —
       const g = SVG("g", {{ style: "cursor:grab;" }});
 
       const circ = SVG("circle", {{
@@ -321,7 +296,7 @@ def _render_interactive_diagram(data: dict, height: int = 800) -> str:
 
       residuesG.appendChild(g);
       makeDraggable(g, p.id);
-      updateElement(p.id);  // position distance label
+      updateElement(p.id);
     }});
   }}
 
@@ -387,7 +362,6 @@ def _render_interactive_diagram(data: dict, height: int = 800) -> str:
   window.resetLayout = function() {{
     PLACEMENTS.forEach(p => {{ pos[p.id] = {{ x: p.bx, y: p.by }}; }});
     PLACEMENTS.forEach(p => updateElement(p.id));
-    // rebuild circles at reset positions
     buildAll();
   }};
 
@@ -774,7 +748,6 @@ def _show_poseview_image(png_data, svg_data, caption, full_legend=False, stamp="
 #  POSEVIEW UI BLOCK (reusable)
 # ══════════════════════════════════════════════════════════════════════════════
 
-
 def _poseview_ui(
     rec_key, pose_sdf_path,
     pdb_id="", cocrystal_ligand_id="",
@@ -787,12 +760,6 @@ def _poseview_ui(
     ref_lig_name="", ref_lig_smiles="", ref_lig_energy=None,
     show_header=True,
 ):
-    """
-    3-tab 2D interaction diagram UI.
-      Tab 1 - New local diagram (SVG style, no API)
-      Tab 2 - Classic RDKit highlight-circle diagram (no API)
-      Tab 3 - PoseView: full API generation via proteins.plus
-    """
     _pose_key = (
         f"{st.session_state.get(smiles_key, 'lig')}_pose{pose_idx+1}{label_suffix}"
     )
@@ -809,9 +776,7 @@ def _poseview_ui(
         "🔬 PoseView (proteins.plus)",
     ])
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # TAB 1 — NEW LOCAL DIAGRAM
-    # ══════════════════════════════════════════════════════════════════════════
+    # ── TAB 1: NEW LOCAL DIAGRAM ──────────────────────────────────────────────
     with _tab_new:
         _rec    = st.session_state.get(rec_key, "")
         _smiles = lig_smiles or st.session_state.get(smiles_key, "")
@@ -827,13 +792,9 @@ def _poseview_ui(
 
             _cl, _cr = st.columns(2)
             with _cl:
-                _cutoff = st.slider(
-                    "Cutoff (Å)", 2.5, 5.5, 4.5, 0.1, key=btn_key + "_cut"
-                )
+                _cutoff = st.slider("Cutoff (Å)", 2.5, 5.5, 4.5, 0.1, key=btn_key + "_cut")
             with _cr:
-                _maxres = st.slider(
-                    "Max residues", 4, 20, 14, 1, key=btn_key + "_max"
-                )
+                _maxres = st.slider("Max residues", 4, 20, 14, 1, key=btn_key + "_max")
 
             if st.button("🧬 Generate", key=btn_key + "_gen", type="primary"):
                 with st.spinner("Generating docked pose diagram…"):
@@ -843,20 +804,14 @@ def _poseview_ui(
                             _energy_part = f"  ·  {binding_energy:.2f} kcal/mol"
                         _title = f"Pose {pose_idx+1}  ·  {lig_name}{_energy_part}"
                         _svg = draw_interaction_diagram(
-                            receptor_pdb=_rec,
-                            pose_sdf=pose_sdf_path,
-                            smiles=_smiles,
-                            title=_title,
-                            cutoff=_cutoff,
-                            max_residues=_maxres,
+                            receptor_pdb=_rec, pose_sdf=pose_sdf_path,
+                            smiles=_smiles, title=_title,
+                            cutoff=_cutoff, max_residues=_maxres,
                         )
                         _data = draw_interaction_diagram_data(
-                            receptor_pdb=_rec,
-                            pose_sdf=pose_sdf_path,
-                            smiles=_smiles,
-                            title=_title,
-                            cutoff=_cutoff,
-                            max_residues=_maxres,
+                            receptor_pdb=_rec, pose_sdf=pose_sdf_path,
+                            smiles=_smiles, title=_title,
+                            cutoff=_cutoff, max_residues=_maxres,
                         )
                         _html = _render_interactive_diagram(_data) if _data else None
                         st.session_state[img_svg_key + "_new"]   = _svg
@@ -891,20 +846,14 @@ def _poseview_ui(
                             _rtitle = f"{_ref_lbl}  ·  Co-crystal{_ref_energy_part}"
                             _ref_sdf_src = _ref_sdf if os.path.exists(_ref_sdf) else pose_sdf_path
                             _ref_svg = draw_interaction_diagram(
-                                receptor_pdb=_rec,
-                                pose_sdf=_ref_sdf_src,
-                                smiles=_ref_smiles,
-                                title=_rtitle,
-                                cutoff=_cutoff,
-                                max_residues=_maxres,
+                                receptor_pdb=_rec, pose_sdf=_ref_sdf_src,
+                                smiles=_ref_smiles, title=_rtitle,
+                                cutoff=_cutoff, max_residues=_maxres,
                             )
                             _ref_data = draw_interaction_diagram_data(
-                                receptor_pdb=_rec,
-                                pose_sdf=_ref_sdf_src,
-                                smiles=_ref_smiles,
-                                title=_rtitle,
-                                cutoff=_cutoff,
-                                max_residues=_maxres,
+                                receptor_pdb=_rec, pose_sdf=_ref_sdf_src,
+                                smiles=_ref_smiles, title=_rtitle,
+                                cutoff=_cutoff, max_residues=_maxres,
                             )
                             _ref_html = _render_interactive_diagram(_ref_data) if _ref_data else None
                             st.session_state[ref_svg_key + "_new"]   = _ref_svg
@@ -988,7 +937,6 @@ def _poseview_ui(
                         _show_svg_new(_new_svg, f"pose{pose_idx+1}_interaction")
                     st.caption("ℹ️ No co-crystal ligand detected — co-crystal reference diagram is not available.")
 
-
                 st.markdown("---")
                 st.markdown("### 🤖 Understand Your Results with AI")
                 st.caption(
@@ -1005,8 +953,6 @@ def _poseview_ui(
                 _pdb_display = pdb_id.upper() or "[PDB ID]"
                 _has_ref_prompt = bool(_new_ref_svg)
                 _ref_display = ref_lig_name or cocrystal_ligand_id or "[co-crystal ligand]"
-                # Was the co-crystal ligand re-docked (binding energy available)?
-                # ref_lig_energy is only set when redocking was performed
                 _ref_redocked = (ref_lig_energy is not None)
                 _ref_estr = (
                     f"{ref_lig_energy:.2f} kcal/mol"
@@ -1086,12 +1032,9 @@ def _poseview_ui(
                         "Label this section: 'Ready-to-use summary:'",
                     ]
 
-                _prompt = "\n".join(_lines)
-                st.code(_prompt, language=None)
+                st.code("\n".join(_lines), language=None)
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # TAB 2 — RDKIT CLASSIC
-    # ══════════════════════════════════════════════════════════════════════════
+    # ── TAB 2: RDKIT CLASSIC ──────────────────────────────────────────────────
     with _tab_rdkit:
         _rec2    = st.session_state.get(rec_key, "")
         _smiles2 = lig_smiles or st.session_state.get(smiles_key, "")
@@ -1128,7 +1071,6 @@ def _poseview_ui(
                 )
 
             if st.button("🔬 Generate Both RDKit Diagrams", key=btn_key + "_rdk_gen", type="primary"):
-                # — Docked pose —
                 with st.spinner("⏳ Generating docked pose diagram…"):
                     try:
                         _mols2 = load_mols_from_sdf(pose_sdf_path)
@@ -1142,20 +1084,15 @@ def _poseview_ui(
                                    if binding_energy is not None else "")
                             )
                             _rdk_svg = draw_interactions_rdkit_classic(
-                                lig_mol=_mol2,
-                                receptor_pdb=_rec2,
-                                smiles=_smiles2,
-                                title=_etitle2,
-                                cutoff=_cut2,
-                                size=(650, 620),
-                                max_residues=_max2,
+                                lig_mol=_mol2, receptor_pdb=_rec2,
+                                smiles=_smiles2, title=_etitle2,
+                                cutoff=_cut2, size=(650, 620), max_residues=_max2,
                             )
                             st.session_state[img_svg_key + "_rdk"]  = _rdk_svg
                             st.session_state[pose_key_key + "_rdk"] = _pose_key
                     except Exception as e:
                         st.error(f"❌ RDKit docked pose error: {e}")
 
-                # — Co-crystal reference —
                 if _has_ref_rdkit2:
                     with st.spinner("⏳ Generating co-crystal reference diagram…"):
                         try:
@@ -1186,13 +1123,9 @@ def _poseview_ui(
                                        if ref_lig_energy is not None else "")
                                 )
                                 _ref_rdk_svg = draw_interactions_rdkit_classic(
-                                    lig_mol=_ref_mol2,
-                                    receptor_pdb=_rec2,
-                                    smiles=_ref_smi2,
-                                    title=_ref_title2,
-                                    cutoff=_cut2,
-                                    size=(650, 620),
-                                    max_residues=_max2,
+                                    lig_mol=_ref_mol2, receptor_pdb=_rec2,
+                                    smiles=_ref_smi2, title=_ref_title2,
+                                    cutoff=_cut2, size=(650, 620), max_residues=_max2,
                                 )
                                 st.session_state[img_svg_key + "_rdk_ref"] = _ref_rdk_svg
                             else:
@@ -1289,7 +1222,6 @@ def _poseview_ui(
                     st.caption("ℹ️ No co-crystal ligand detected — co-crystal reference diagram is not available.")
 
                 st.markdown("---")
-                # AI Prompt (RDKit)
                 st.markdown("### 🤖 Understand Your Results with AI")
                 st.caption(
                     "Screenshot this diagram, then paste the prompt below "
@@ -1383,9 +1315,7 @@ def _poseview_ui(
                     ]
                 st.code("\n".join(_rdk_lines), language=None)
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # TAB 3 — POSEVIEW (proteins.plus API)
-    # ══════════════════════════════════════════════════════════════════════════
+    # ── TAB 3: POSEVIEW ───────────────────────────────────────────────────────
     with _tab_pv:
         _ci, _cb = st.columns([3, 1])
         with _ci:
@@ -1448,24 +1378,19 @@ def _poseview_ui(
             with _dl_c1:
                 if _rec_path and os.path.exists(_rec_path):
                     st.download_button(
-                        "⬇ receptor.pdb",
-                        data      = open(_rec_path, "rb"),
-                        file_name = "receptor.pdb",
-                        mime      = "chemical/x-pdb",
-                        key       = btn_key + "_pv_dl_rec",
-                        width     = 'stretch',
+                        "⬇ receptor.pdb", data=open(_rec_path, "rb"),
+                        file_name="receptor.pdb", mime="chemical/x-pdb",
+                        key=btn_key + "_pv_dl_rec", width='stretch',
                     )
                 else:
                     st.caption("Receptor not ready.")
             with _dl_c2:
                 if os.path.exists(pose_sdf_path):
                     st.download_button(
-                        "⬇ docked_pose.sdf",
-                        data      = open(pose_sdf_path, "rb"),
-                        file_name = f"pose_{pose_idx+1}_docked.sdf",
-                        mime      = "chemical/x-mdl-sdfile",
-                        key       = btn_key + "_pv_dl_sdf",
-                        width     = 'stretch',
+                        "⬇ docked_pose.sdf", data=open(pose_sdf_path, "rb"),
+                        file_name=f"pose_{pose_idx+1}_docked.sdf",
+                        mime="chemical/x-mdl-sdfile",
+                        key=btn_key + "_pv_dl_sdf", width='stretch',
                     )
                 else:
                     st.caption("Pose SDF not ready.")
@@ -1554,16 +1479,14 @@ def _poseview_ui(
                                     "⬇ PNG", data=_ref_png2,
                                     file_name=f"cocrystal_{pdb_id}_{cocrystal_ligand_id}.png",
                                     mime="image/png",
-                                    key=dl_png_key + "_pv_ref",
-                                    width='stretch',
+                                    key=dl_png_key + "_pv_ref", width='stretch',
                                 )
                         with _r2:
                             st.download_button(
                                 "⬇ SVG", data=_ref_svg2,
                                 file_name=f"cocrystal_{pdb_id}_{cocrystal_ligand_id}.svg",
                                 mime="image/svg+xml",
-                                key=dl_svg_key + "_pv_ref",
-                                width='stretch',
+                                key=dl_svg_key + "_pv_ref", width='stretch',
                             )
                     else:
                         st.info("Click **Generate 2D Diagrams** to load the co-crystal reference.")
@@ -1680,9 +1603,7 @@ def _receptor_section(pfx: str, wdir: Path, step_label: str):
             else:
                 raw_path = str(wdir / "raw.pdb")
                 _dl_url  = f"https://files.rcsb.org/download/{token}.pdb"
-            rc, _ = _run_cmd([
-                "curl", "-sf", _dl_url, "-o", raw_path,
-            ])
+            rc, _ = _run_cmd(["curl", "-sf", _dl_url, "-o", raw_path])
             if rc != 0 or not os.path.exists(raw_path) or os.path.getsize(raw_path) < 200:
                 if _fmt == "PDB":
                     raw_path_cif = str(wdir / "raw.cif")
@@ -1846,11 +1767,8 @@ st.markdown(
     "Molecular docking powered by **AutoDock Vina 1.2.7,** "
     "**pKaNET Cloud**, and **RDkit**."
 )
-st.markdown(
-    "**Basic** — single ligand. **Batch** — multiple ligands.")
-st.markdown(
-    "**☁️ Cloud-ready | 📱 Mobile-compatible**"
-)
+st.markdown("**Basic** — single ligand. **Batch** — multiple ligands.")
+st.markdown("**☁️ Cloud-ready | 📱 Mobile-compatible**")
 
 if VINA_PATH is None:
     st.error(f"❌ Could not download Vina binary: {_vina_err}")
@@ -1863,10 +1781,7 @@ if not _OBABEL_OK:
     )
     st.stop()
 
-st.markdown(
-    f"{_pill('Vina 1.2.7 ready', 'success')} ",
-    unsafe_allow_html=True,
-)
+st.markdown(f"{_pill('Vina 1.2.7 ready', 'success')} ", unsafe_allow_html=True)
 st.markdown('<hr class="step-divider">', unsafe_allow_html=True)
 
 
@@ -1960,10 +1875,8 @@ with tab_basic:
 
                 _upload_prot = st.session_state.get("lig_upload_prot", "Use the uploaded form")
                 if _upload_prot == "Use the uploaded form":
-                    # Direct preparation — no protonation
                     result = prepare_ligand_from_file(_tmp, lig_name, WORKDIR)
                 else:
-                    # Convert to SMILES then protonate
                     try:
                         smiles_in = smiles_from_file(_tmp, WORKDIR)
                     except Exception as e:
@@ -1977,7 +1890,6 @@ with tab_basic:
                     st.stop()
                 result = prepare_ligand(smiles_in, lig_name, ph_in, WORKDIR)
             else:
-                # SMILES string mode
                 result = prepare_ligand(smiles_in, lig_name, ph_in, WORKDIR)
 
         if result["success"]:
@@ -2166,26 +2078,41 @@ with tab_basic:
             )
             if not os.path.exists(pv_sdf) or os.path.getsize(pv_sdf) < 10:
                 pv_sdf = dock["out_sdf"]
+
+            # ── Build score table with RMSD vs crystal ────────────────────
+            # IMPORTANT: keep RMSD as float/None (never string "—") so the
+            # column stays float64. Mixed object dtype breaks pandas Styler
+            # and causes the table to not update on re-dock.
             if dock["scores"]:
                 _cryst_pdb_df = st.session_state.get("ligand_pdb_path") or ""
-                _pose_mols_df = (
-                    load_mols_from_sdf(dock["out_sdf"], sanitize=False)
-                    if os.path.exists(dock["out_sdf"]) else []
-                )
+                _pose_mols_df = []
+                try:
+                    if os.path.exists(dock["out_sdf"]):
+                        _pose_mols_df = load_mols_from_sdf(
+                            dock["out_sdf"], sanitize=False
+                        )
+                except Exception:
+                    pass
+
                 _rows = []
                 for s in dock["scores"]:
                     _pose_num = s["pose"]
-                    _rmsd_crystal = None
-                    if _cryst_pdb_df and os.path.exists(_cryst_pdb_df):
-                        _mol_idx = (_pose_num - 1) if _pose_num else 0
-                        if _mol_idx < len(_pose_mols_df):
-                            _rmsd_crystal = calc_rmsd_heavy(
-                                _pose_mols_df[_mol_idx], _cryst_pdb_df
-                            )
+                    _rmsd_val = None
+                    try:
+                        if _cryst_pdb_df and os.path.exists(_cryst_pdb_df):
+                            _mol_idx = (_pose_num - 1) if _pose_num else 0
+                            if _mol_idx < len(_pose_mols_df):
+                                _r = calc_rmsd_heavy(
+                                    _pose_mols_df[_mol_idx], _cryst_pdb_df
+                                )
+                                if _r is not None:
+                                    _rmsd_val = round(float(_r), 2)
+                    except Exception:
+                        pass
                     _rows.append({
-                        "Pose":                 _pose_num,
-                        "Affinity (kcal/mol)":  s["affinity"],
-                        "RMSD vs crystal (Å)":  round(_rmsd_crystal, 2) if _rmsd_crystal is not None else "—",
+                        "Pose":                  _pose_num,
+                        "Affinity (kcal/mol)":   s["affinity"],
+                        "RMSD vs crystal (Å)":   _rmsd_val,  # float or None→NaN
                     })
                 df = (
                     pd.DataFrame(_rows)
@@ -2194,8 +2121,6 @@ with tab_basic:
                 )
             else:
                 df = None
-                
-        
 
             mols = (
                 load_mols_from_sdf(dock["out_sdf"], sanitize=False)
@@ -2217,6 +2142,7 @@ with tab_basic:
                 "pv_image_png":  None,
                 "pv_image_svg":  None,
                 "pv_pose_key":   None,
+                # Increment run ID → forces score table widget re-render
                 "dock_run_id":   st.session_state.get("dock_run_id", 0) + 1,
                 "redock_done":          redock_result is not None,
                 "redock_score":         redock_score,
@@ -2279,26 +2205,25 @@ with tab_basic:
             st.markdown("**Score Table**")
             if df is not None:
                 _run_id = st.session_state.get("dock_run_id", 0)
-                _has_rmsd = df["RMSD vs crystal (Å)"].notna().any()
-                _fmt = {"Affinity (kcal/mol)": "{:.2f}"}
-                if _has_rmsd:
-                    _fmt["RMSD vs crystal (Å)"] = lambda v: (
-                        f"{v:.2f} Å" if pd.notna(v) else "—"
-                    )
-                _styled = (
+                # Always format both columns — lambda handles NaN cleanly.
+                # Never use conditional formatting: skipping a column format
+                # on re-dock is the bug that caused the table not to update.
+                st.dataframe(
                     df.style
                     .background_gradient(
                         cmap="RdYlGn",
                         subset=["Affinity (kcal/mol)"],
                         gmap=-df["Affinity (kcal/mol)"],
                     )
-                    .format(_fmt)
-                )
-                st.dataframe(
-                    _styled,
+                    .format({
+                        "Affinity (kcal/mol)": "{:.2f}",
+                        "RMSD vs crystal (Å)": lambda v: (
+                            f"{v:.2f} Å" if pd.notna(v) else "—"
+                        ),
+                    }),
                     hide_index=True,
                     width='stretch',
-                    key=f"score_table_{_run_id}",   # ← forces re-render on every dock
+                    key=f"score_table_{_run_id}",  # unique key → always re-renders
                 )
         with cc:
             st.markdown("**Affinity by Pose**")
@@ -2448,16 +2373,14 @@ with tab_basic:
                         f"⬇ Ref pose {_rd_pose_i+1} (.sdf)",
                         open(_sp_rd, "rb"),
                         file_name=f"redock_{_rd_safe}_pose{_rd_pose_i+1}.sdf",
-                        key="dl_rd_pose",
-                        width='stretch',
+                        key="dl_rd_pose", width='stretch',
                     )
                     if _redock_result.get("out_pdbqt") and os.path.exists(_redock_result["out_pdbqt"]):
                         st.download_button(
                             "⬇ All ref poses (.pdbqt)",
                             open(_redock_result["out_pdbqt"], "rb"),
                             file_name=f"redock_{_rd_safe}_out.pdbqt",
-                            key="dl_rd_pdbqt",
-                            width='stretch',
+                            key="dl_rd_pdbqt", width='stretch',
                         )
 
             st.markdown("---")
@@ -2558,15 +2481,13 @@ with tab_basic:
                     f"⬇ Pose {pose_idx+1} (.sdf)",
                     open(sp_raw, "rb"),
                     file_name=f"pose_{pose_idx+1}.sdf",
-                    key=f"dl_p_{pose_idx}",
-                    width='stretch',
+                    key=f"dl_p_{pose_idx}", width='stretch',
                 )
                 st.download_button(
                     "⬇ All poses (.pdbqt)",
                     open(st.session_state.output_pdbqt, "rb"),
                     file_name=f"{st.session_state.dock_base}_out.pdbqt",
-                    key="dl_pdbqt",
-                    width='stretch',
+                    key="dl_pdbqt", width='stretch',
                 )
                 if df is not None:
                     st.download_button(
@@ -2574,16 +2495,14 @@ with tab_basic:
                         df.to_csv(index=False).encode(),
                         file_name=f"{st.session_state.dock_base}_scores.csv",
                         mime="text/csv",
-                        key="dl_csv",
-                        width='stretch',
+                        key="dl_csv", width='stretch',
                     )
                 if st.session_state.receptor_fh and os.path.exists(st.session_state.receptor_fh):
                     st.download_button(
                         "⬇ Receptor (.pdb)",
                         open(st.session_state.receptor_fh, "rb"),
                         file_name="receptor.pdb",
-                        key="dl_rec",
-                        width='stretch',
+                        key="dl_rec", width='stretch',
                     )
 
             st.markdown("---")
@@ -2594,12 +2513,8 @@ with tab_basic:
                     "Distance cutoff (A)", 2.5, 5.0, 3.5, 0.1, key="bp_cutoff"
                 )
             with _bpr:
-                _show_labels = st.checkbox(
-                    "Show residue labels", value=True, key="bp_show_labels"
-                )
-                _show_surface = st.checkbox(
-                    "Show protein surface", value=False, key="bp_show_surface"
-                )
+                _show_labels  = st.checkbox("Show residue labels",  value=True,  key="bp_show_labels")
+                _show_surface = st.checkbox("Show protein surface",  value=False, key="bp_show_surface")
 
             try:
                 vbp = py3Dmol.view(width="100%", height=440)
@@ -2613,10 +2528,7 @@ with tab_basic:
                     if _show_surface:
                         vbp.addSurface(
                             py3Dmol.SAS,
-                            {
-                                "opacity": 0.55,
-                                "color": "white",
-                            },
+                            {"opacity": 0.55, "color": "white"},
                             {"model": mbp},
                         )
                     mbp += 1
@@ -2795,7 +2707,7 @@ with tab_batch:
         b_ph_val  = st.session_state.get("b_ph", 7.4)
 
         smiles_pairs = []
-        struct_file_pairs = []  # list of (file_path, name) for uploaded structure files
+        struct_file_pairs = []
         _b_use_struct_files = False
         try:
             if st.session_state.get("b_input_mode") == "SMILES list (text)":
@@ -2818,7 +2730,6 @@ with tab_batch:
                     _nm = pts[1].replace(" ", "_") if len(pts) > 1 else f"lig_{len(smiles_pairs)+1}"
                     smiles_pairs.append((pts[0], _nm))
             else:
-                # Upload structure files mode
                 _b_use_struct_files = True
                 _uploaded = st.session_state.get("b_struct_files", [])
                 if not _uploaded:
@@ -2901,7 +2812,6 @@ with tab_batch:
 
             prog.progress(i / n, text=f"Docking {name} ({i+1}/{n})…")
 
-            # --- ligand preparation ---
             if _b_use_struct_files:
                 _struct_prot = st.session_state.get("b_struct_prot", "Use the uploaded form")
                 if _struct_prot == "Use the uploaded form":
@@ -2912,8 +2822,7 @@ with tab_batch:
                     except Exception as e:
                         results.append({
                             "Name": name, "SMILES": "", "Charge": None,
-                            "Top Score": None,
-                            "Status": f"PREP FAILED: {e}",
+                            "Top Score": None, "Status": f"PREP FAILED: {e}",
                         })
                         all_logs.append(f"[{name}] PREP ERROR: {e}")
                         continue
@@ -2924,8 +2833,7 @@ with tab_batch:
             if not prep["success"]:
                 results.append({
                     "Name": name, "SMILES": smi, "Charge": None,
-                    "Top Score": None,
-                    "Status": f"PREP FAILED: {prep['error']}",
+                    "Top Score": None, "Status": f"PREP FAILED: {prep['error']}",
                 })
                 all_logs.append(f"[{name}] PREP ERROR: {prep['error']}")
                 continue
@@ -3161,16 +3069,14 @@ with tab_batch:
                         f"⬇ Pose {b_pose_i+1} (.sdf)",
                         open(sp3, "rb"),
                         file_name=f"{safe_nm}_pose{b_pose_i+1}.sdf",
-                        key="b_dl_pose",
-                        width='stretch',
+                        key="b_dl_pose", width='stretch',
                     )
                     if sel_res.get("out_pdbqt") and os.path.exists(sel_res["out_pdbqt"]):
                         st.download_button(
                             "⬇ All poses (.pdbqt)",
                             open(sel_res["out_pdbqt"], "rb"),
                             file_name=f"{safe_nm}_out.pdbqt",
-                            key="b_dl_pdbqt",
-                            width='stretch',
+                            key="b_dl_pdbqt", width='stretch',
                         )
 
         st.markdown("---")
@@ -3283,8 +3189,7 @@ with tab_batch:
                     ok_df.to_csv(index=False).encode(),
                     file_name="batch_scores.csv",
                     mime="text/csv",
-                    key="b_dl_csv",
-                    width='stretch',
+                    key="b_dl_csv", width='stretch',
                 )
         with c_zip:
             zb = io.BytesIO()
@@ -3315,8 +3220,7 @@ with tab_batch:
                 "⬇ Download ALL (.zip)", zb,
                 file_name="anyone_can_dock.zip",
                 mime="application/zip",
-                key="b_dl_zip",
-                width='stretch',
+                key="b_dl_zip", width='stretch',
             )
 
         # 2D Interaction diagram
@@ -3385,7 +3289,7 @@ with tab_batch:
                     binding_energy      = pv_score,
                     ref_lig_name        = redock_result.get("ref_name", "") if redock_result else "",
                     ref_lig_smiles      = (redock_result.get("prot_smiles") or redock_result.get("SMILES", "")) if redock_result else "",
-                    ref_lig_energy      = redock_result.get("Top Score")     if redock_result else None,
+                    ref_lig_energy      = redock_result.get("Top Score") if redock_result else None,
                     show_header         = False,
                 )
 
