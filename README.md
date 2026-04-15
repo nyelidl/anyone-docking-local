@@ -15,7 +15,7 @@ Batch docking with 4 docking engines: [![Open In Colab](https://colab.research.g
 ## 🖥️ Run locally
 
 ### Google Colab
-Run locally on Google colab: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1WtWYUUB1AREZMeB5qEJ9OD84AvWk1z4z?usp=sharing)
+Run locally on Google colab with streamlit interface: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1WtWYUUB1AREZMeB5qEJ9OD84AvWk1z4z?usp=sharing)
 
 
 ### Linux (Ubuntu / Debian)
