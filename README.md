@@ -60,33 +60,6 @@ pip install -r requirements.txt && \
 streamlit run app.py
 ```
 
-
-### Google Colab
-
-
-# ── Cell 1: Install system packages & clone repo ──────────────────────────
-!apt-get install -y -q python3.11 python3.11-venv openbabel libcairo2-dev libpangocairo-1.0-0
-!git clone https://github.com/nyelidl/anyone-docking-local.git
-
-# ── Cell 2: Install Python dependencies ───────────────────────────────────
-!pip install -q -r anyone-docking-local/requirements.txt
-
-# ── Cell 3: Launch the app ─────────────────────────────────────────────────
-!pip install -q pyngrok
-from pyngrok import ngrok
-import subprocess, time
-
-proc = subprocess.Popen(
-    ["streamlit", "run", "anyone-docking-local/app.py",
-     "--server.port=8501", "--server.headless=true"],
-    stdout=subprocess.PIPE, stderr=subprocess.PIPE
-)
-
-time.sleep(3)
-public_url = ngrok.connect(8501)
-print("✅ Open your app here:", public_url)
-
-
 ### All platforms
 
 - Python 3.10+ required
