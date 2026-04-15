@@ -14,6 +14,10 @@ Batch docking with 4 docking engines: [![Open In Colab](https://colab.research.g
 
 ## 🖥️ Run locally
 
+### Google Colab
+Run locally on Google colab: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1WtWYUUB1AREZMeB5qEJ9OD84AvWk1z4z?usp=sharing)
+
+
 ### Linux (Ubuntu / Debian)
 ```bash
 sudo apt install python3.11 python3.11-venv openbabel libcairo2-dev libpangocairo-1.0-0 && \
@@ -55,6 +59,33 @@ venv\Scripts\activate && \
 pip install -r requirements.txt && \
 streamlit run app.py
 ```
+
+
+### Google Colab
+
+
+# ── Cell 1: Install system packages & clone repo ──────────────────────────
+!apt-get install -y -q python3.11 python3.11-venv openbabel libcairo2-dev libpangocairo-1.0-0
+!git clone https://github.com/nyelidl/anyone-docking-local.git
+
+# ── Cell 2: Install Python dependencies ───────────────────────────────────
+!pip install -q -r anyone-docking-local/requirements.txt
+
+# ── Cell 3: Launch the app ─────────────────────────────────────────────────
+!pip install -q pyngrok
+from pyngrok import ngrok
+import subprocess, time
+
+proc = subprocess.Popen(
+    ["streamlit", "run", "anyone-docking-local/app.py",
+     "--server.port=8501", "--server.headless=true"],
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE
+)
+
+time.sleep(3)
+public_url = ngrok.connect(8501)
+print("✅ Open your app here:", public_url)
+
 
 ### All platforms
 
