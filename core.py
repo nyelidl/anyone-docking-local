@@ -4,6 +4,28 @@ core.py — Pure computation layer for Anyone Can Dock.
 No Streamlit imports. All functions return plain dicts / tuples.
 Safe to import in Colab notebooks, pytest, or any UI framework.
 
+Fixes vs previous version:
+  - load_mols_from_sdf: suppress RDKit kekulize noise, fallback sanitize loop
+  - fix_sdf_bond_orders: AddHs with addCoords=True preserves docked pose coords
+  - convert_sdf_to_v2000: removed --gen3d flag (was destroying docked pose)
+  - call_poseview_v1: posts receptor PDB directly to /api/v2/poseview/
+  - warm_poseview_cache: now a no-op (MoleculeHandler pre-upload removed)
+  - call_poseview2_ref: retry + full-response logging
+  - Heme: _AROM_ATOMS / _AROM_ATOM_NAMES extended for porphyrin pi-detection
+  - Heme: hydrophobic detection extended to heme residue names
+  - pKaNET: full replacement matching real pKaNET Cloud notebook pipeline
+    FIX 1  — peri chelation for 5-OH (C5-C4a-C4=O path)
+    FIX 2  — isolated A-ring phenol pKa 8.0 -> 7.0
+    FIX 3  — flavonol 3-OH pKa 9.0 (direct bond, not chelated)
+    FIX 4  — pyrogallol-center 8.5; catechol-pair 7.0
+    FIX 5  — claimed_atoms blocks SMARTS from overwriting A-ring OHs
+    FIX 6  — hh_match_score uses dpH-scaled formula
+    FIX 7  — score_tautomer has aromaticity-loss penalty vs ref_mol
+    FIX 8  — score_microstate has all 8 components
+    FIX 9  — _manual_deprotonate_site added
+    FIX 10 — _supplement_dimorphite added
+    FIX 11 — _generate_ranked_microstates replaces inner loop
+    FIX 12 — prepare_ligand dimorphite path calls site correction
 """
 
 import os
