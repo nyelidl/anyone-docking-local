@@ -465,6 +465,138 @@ def _pill(text, kind="info"):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  PROTEIN SEARCH — RCSB
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _rcsb_entry_has_no_missing_residues(entry_json: dict):
+    """Best-effort completeness check from entry-level modeled vs deposited counts."""
+    try:
+        info = entry_json.get("rcsb_entry_info", {}) or {}
+        modeled = info.get("deposited_modeled_polymer_monomer_count")
+        deposited = info.get("deposited_polymer_monomer_count")
+        if isinstance(modeled, int) and isinstance(deposited, int) and deposited > 0:
+            return modeled == deposited
+    except Exception:
+        pass
+    return None
+
+
+def _search_protein_rcsb(query: str, top_n: int = 12) -> list[dict]:
+    """
+    Search RCSB by protein/keyword and return entry summaries.
+    Uses Search API for IDs, then Data API for metadata.
+    """
+    try:
+        import requests as _req
+    except Exception:
+        return []
+
+    q = (query or "").strip()
+    if not q:
+        return []
+
+    search_payload = {
+        "query": {
+            "type": "terminal",
+            "service": "full_text",
+            "parameters": {"value": q},
+        },
+        "return_type": "entry",
+        "request_options": {
+            "paginate": {"start": 0, "rows": int(top_n)},
+            "results_verbosity": "compact",
+        },
+    }
+
+    try:
+        r = _req.post(
+            "https://search.rcsb.org/rcsbsearch/v2/query",
+            json=search_payload,
+            timeout=12,
+        )
+        if r.status_code != 200:
+            return []
+        data = r.json() or {}
+        hits = data.get("result_set", []) or []
+    except Exception:
+        return []
+
+    out = []
+    for hit in hits:
+        # RCSB may return each hit as a dict like {"identifier": "1ABC", ...}
+        # or, in some cases, as a bare identifier/string-like object.
+        if isinstance(hit, dict):
+            pdb_id = str(hit.get("identifier", "") or hit.get("entry_id", "")).strip().upper()
+        else:
+            pdb_id = str(hit).strip().upper()
+        if not pdb_id:
+            continue
+        # Skip malformed values such as full dict repr strings.
+        if any(ch in pdb_id for ch in "{}[]:, "):
+            continue
+
+        title = ""
+        resolution = None
+        method = ""
+        protein_name = ""
+        no_missing = None
+
+        try:
+            r2 = _req.get(
+                f"https://data.rcsb.org/rest/v1/core/entry/{pdb_id}",
+                timeout=10,
+            )
+            if r2.status_code == 200:
+                ej = r2.json() or {}
+                title = ((ej.get("struct", {}) or {}).get("title", "") or "").strip()
+                info = ej.get("rcsb_entry_info", {}) or {}
+                res_comb = info.get("resolution_combined")
+                if isinstance(res_comb, list) and res_comb:
+                    try:
+                        resolution = float(res_comb[0])
+                    except Exception:
+                        resolution = None
+                method = ""
+                exptl = ej.get("exptl") or []
+                if exptl and isinstance(exptl, list):
+                    method = str((exptl[0] or {}).get("method", "") or "")
+                no_missing = _rcsb_entry_has_no_missing_residues(ej)
+        except Exception:
+            pass
+
+        try:
+            r3 = _req.get(
+                f"https://data.rcsb.org/rest/v1/core/polymer_entity/{pdb_id}/1",
+                timeout=10,
+            )
+            if r3.status_code == 200:
+                pj = r3.json() or {}
+                desc = ((pj.get("rcsb_polymer_entity", {}) or {}).get("pdbx_description", "") or "").strip()
+                protein_name = desc
+        except Exception:
+            pass
+
+        out.append({
+            "pdb_id": pdb_id,
+            "title": title,
+            "protein_name": protein_name,
+            "resolution": resolution,
+            "method": method,
+            "no_missing_residues": no_missing,
+        })
+
+    def _sort_key(x):
+        res = x["resolution"] if isinstance(x["resolution"], (int, float)) else 999.0
+        miss_rank = 0 if x["no_missing_residues"] is True else (1 if x["no_missing_residues"] is None else 2)
+        return (miss_rank, res, x["pdb_id"])
+
+    out.sort(key=_sort_key)
+    return out
+
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  GLOBAL CSS
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown("""
