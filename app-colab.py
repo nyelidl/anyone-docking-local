@@ -607,6 +607,12 @@ _DEFAULTS = dict(
     b_pv2_image_png=None, b_pv2_image_svg=None, b_pv2_pose_key=None,
     b_pv2_ref_png=None, b_pv2_ref_svg=None,
     b_plot_png=None,
+    input_smiles_final="",
+    ligand_charge=None,
+    ligand_charge_method="rdkit_formal_charge",
+    ligand_charged_atoms=None,
+    ligand_is_zwitterion=False,
+    ligand_prep_mode="",
 )
 for k, v in _DEFAULTS.items():
     if k not in st.session_state:
@@ -1447,9 +1453,94 @@ def _receptor_section(pfx: str, wdir: Path, step_label: str):
             horizontal=True, key=pfx + "src_mode",
         )
         if src == "Download from RCSB":
+            with st.expander("🔎 Search protein / target in RCSB", expanded=False):
+                _qs_col, _qb_col = st.columns([5, 1])
+                with _qs_col:
+                    _rcsb_query = st.text_input(
+                        "Search protein / keyword",
+                        value=st.session_state.get(pfx + "rcsb_query", ""),
+                        placeholder="e.g. EGFR kinase, HIV protease, acetylcholinesterase…",
+                        key=pfx + "rcsb_query",
+                    )
+                with _qb_col:
+                    st.markdown("<div style='height: 1.75rem;'></div>", unsafe_allow_html=True)
+                    _search_clicked = st.button("Search", key=pfx + "rcsb_search_btn", type="secondary")
+
+                _pref_col1, _pref_col2 = st.columns([1, 1.1])
+                with _pref_col1:
+                    _prefer_complete = st.checkbox(
+                        "Prefer no missing residues",
+                        value=True,
+                        key=pfx + "rcsb_prefer_complete",
+                    )
+                with _pref_col2:
+                    _sort_best_res = st.checkbox(
+                        "Sort by best resolution",
+                        value=True,
+                        key=pfx + "rcsb_sort_best_res",
+                    )
+
+                if _search_clicked and _rcsb_query.strip():
+                    with st.spinner(f"Searching RCSB for '{_rcsb_query}'…"):
+                        _hits = _search_protein_rcsb(_rcsb_query.strip(), top_n=12)
+                        if _prefer_complete:
+                            _hits = sorted(
+                                _hits,
+                                key=lambda x: (
+                                    0 if x.get("no_missing_residues") is True else (1 if x.get("no_missing_residues") is None else 2),
+                                    x.get("resolution") if isinstance(x.get("resolution"), (int, float)) else 999.0,
+                                    x.get("pdb_id", ""),
+                                ),
+                            )
+                        elif _sort_best_res:
+                            _hits = sorted(
+                                _hits,
+                                key=lambda x: (
+                                    x.get("resolution") if isinstance(x.get("resolution"), (int, float)) else 999.0,
+                                    x.get("pdb_id", ""),
+                                ),
+                            )
+                        st.session_state[pfx + "rcsb_hits"] = _hits
+
+                _hits = st.session_state.get(pfx + "rcsb_hits", [])
+                if _hits:
+                    def _fmt_hit(h):
+                        _res = f"{h['resolution']:.2f} Å" if isinstance(h.get("resolution"), (int, float)) else "n/a"
+                        _miss = (
+                            "complete"
+                            if h.get("no_missing_residues") is True
+                            else ("missing?" if h.get("no_missing_residues") is None else "has missing")
+                        )
+                        _name = h.get("protein_name") or h.get("title") or ""
+                        return f"{h['pdb_id']}  |  {_res}  |  {_miss}  |  {_name[:90]}"
+
+                    _labels = [_fmt_hit(h) for h in _hits]
+                    _sel = st.selectbox(
+                        "RCSB matches",
+                        options=list(range(len(_hits))),
+                        format_func=lambda i: _labels[i],
+                        key=pfx + "rcsb_hit_idx",
+                    )
+                    _picked = _hits[_sel]
+                    _meta_res = f"{_picked['resolution']:.2f} Å" if isinstance(_picked.get("resolution"), (int, float)) else "n/a"
+                    _meta_missing = (
+                        "No missing residues"
+                        if _picked.get("no_missing_residues") is True
+                        else ("Missing residues unknown" if _picked.get("no_missing_residues") is None else "Has missing residues")
+                    )
+                    st.caption(
+                        f"**{_picked['pdb_id']}** · {_meta_res} · {_picked.get('method') or 'method n/a'} · {_meta_missing}"
+                    )
+                    if _picked.get("title"):
+                        st.caption(_picked["title"])
+                    if st.button("Use selected PDB ID", key=pfx + "use_selected_pdb", type="primary"):
+                        st.session_state[pfx + "pdb_id"] = _picked["pdb_id"]
+                        st.session_state[pfx + "pdb_token"] = _picked["pdb_id"]
+                        st.rerun()
+
             _id_col, _fmt_col = st.columns([1.5, 1])
             with _id_col:
-                pdb_id = st.text_input("PDB ID", value="1M17", max_chars=4, key=pfx + "pdb_id")
+                pdb_id = st.text_input("PDB ID", value=st.session_state.get(pfx + "pdb_token", "1M17"), max_chars=4, key=pfx + "pdb_id")
             with _fmt_col:
                 rcsb_fmt = st.radio(
                     "Format", ["PDB", "CIF"],
@@ -2002,8 +2093,16 @@ with tab_basic:
             st.error("❌ `streamlit-ketcher` not installed")
             smiles_in = ""
 
-    lig_name_in = st.text_input("Output name", value="ELR", key="lig_name_in")
+    if "lig_name_in" not in st.session_state:
+        st.session_state["lig_name_in"] = st.session_state.get("lig_name_from_pubchem", "ELR")
+    lig_name_in = st.text_input("Output name", key="lig_name_in")
     ph_in       = st.number_input("Target pH", 0.0, 14.0, 7.4, 0.1, key="ph_in")
+    st.caption("Default ligand preparation uses Dimorphite-DL at the target pH, then reports the RDKit formal charge of the final SMILES.")
+
+    # ── Protonation mode ──────────────────────────────────────────────────────
+    _prot_mode_key = "dimorphite"
+    _use_pubchem = False
+    # ─────────────────────────────────────────────────────────────────────────
 
     if not st.session_state.receptor_done:
         st.caption("⚠ Complete Step 1 first.")
@@ -2011,9 +2110,21 @@ with tab_basic:
         "▶ Prepare Ligand", key="btn_ligand", type="primary",
         disabled=not st.session_state.receptor_done,
     ):
+        st.session_state["input_smiles_final"] = ""
+        st.session_state["prot_smiles"] = None
+        st.session_state["ligand_charge"] = None
+        st.session_state["ligand_charge_method"] = "rdkit_formal_charge"
+        st.session_state["ligand_charged_atoms"] = []
+        st.session_state["ligand_is_zwitterion"] = False
+        st.session_state["ligand_prep_mode"] = ""
         lig_name = lig_name_in.strip() or "LIG"
         with st.spinner("Preparing ligand…"):
             _mode = st.session_state.get("lig_input_mode", "SMILES string")
+            _prot_mode_key  = "dimorphite"
+            _use_pubchem    = False
+            _pkanet_max_tau = st.session_state.get("pkanet_max_tau", 8)
+            _pkanet_ph_win  = st.session_state.get("pkanet_ph_win", 1.0)
+
             if "Upload" in _mode:
                 _sfobj = st.session_state.get("lig_struct_file")
                 if _sfobj is None:
@@ -2030,28 +2141,45 @@ with tab_basic:
                         smiles_in = smiles_from_file(_tmp, WORKDIR)
                     except Exception as e:
                         st.error(f"❌ Could not read structure: {e}"); st.stop()
-                    result = prepare_ligand(smiles_in, lig_name, ph_in, WORKDIR)
+                    result = prepare_ligand(smiles_in, lig_name, ph_in, WORKDIR,
+                                            mode=_prot_mode_key, use_pubchem=_use_pubchem,
+                                            max_tautomers=_pkanet_max_tau, ph_window=_pkanet_ph_win)
             elif "Ketcher" in _mode:
                 smiles_in = st.session_state.get("ketcher_smi", "").strip()
                 if not smiles_in:
                     st.error("No molecule drawn in Ketcher."); st.stop()
-                result = prepare_ligand(smiles_in, lig_name, ph_in, WORKDIR)
+                result = prepare_ligand(smiles_in, lig_name, ph_in, WORKDIR,
+                                        mode=_prot_mode_key, use_pubchem=_use_pubchem,
+                                        max_tautomers=_pkanet_max_tau, ph_window=_pkanet_ph_win)
             else:
-                result = prepare_ligand(smiles_in, lig_name, ph_in, WORKDIR)
+                result = prepare_ligand(smiles_in, lig_name, ph_in, WORKDIR,
+                                        mode=_prot_mode_key, use_pubchem=_use_pubchem,
+                                        max_tautomers=_pkanet_max_tau, ph_window=_pkanet_ph_win)
 
         if result["success"]:
             st.session_state.update({
-                "ligand_pdbqt": result["pdbqt"],
-                "ligand_sdf":   result["sdf"],
-                "ligand_name":  lig_name,
-                "prot_smiles":  result["prot_smiles"],
-                "ligand_done":  True,
-                "ligand_log":   "\n".join(result["log"]),
+                "ligand_pdbqt":         result["pdbqt"],
+                "ligand_sdf":           result["sdf"],
+                "ligand_name":          lig_name,
+                "input_smiles_final":   result.get("input_smiles", smiles_in),
+                "prot_smiles":          result["prot_smiles"],
+                "ligand_charge":        result.get("net_charge", result.get("charge")),
+                "ligand_charge_method": result.get("charge_method", "rdkit_formal_charge"),
+                "ligand_charged_atoms": result.get("charged_atoms", []),
+                "ligand_is_zwitterion": result.get("is_zwitterion", False),
+                "ligand_prep_mode":     result.get("protonation_mode", _prot_mode_key),
+                "ligand_done":          True,
+                "ligand_log":           "\n".join(result["log"]),
             })
         else:
             st.error(f"❌ Ligand preparation failed: {result['error']}")
             st.session_state.ligand_done = False
             st.session_state.ligand_log  = "\n".join(result["log"])
+            st.session_state["prot_smiles"] = None
+            st.session_state["ligand_charge"] = None
+            st.session_state["ligand_charged_atoms"] = []
+            st.session_state["ligand_is_zwitterion"] = False
+            st.session_state["ligand_prep_mode"] = ""
 
     if st.session_state.ligand_done:
         import py3Dmol
@@ -2067,6 +2195,24 @@ with tab_basic:
                 f'<div class="log-box">{st.session_state.ligand_log}</div>',
                 unsafe_allow_html=True,
             )
+
+        st.markdown("**Ligand state summary**")
+        _charged_atoms_rows = st.session_state.get("ligand_charged_atoms") or []
+        _charged_atoms_txt = (
+            ", ".join(
+                f"{r.get('symbol','?')}{r.get('atom_idx','?')}({int(r.get('formal_charge',0)):+d})"
+                for r in _charged_atoms_rows
+            ) if _charged_atoms_rows else "none"
+        )
+        _summary_lines = [
+            f"Preparation mode: `{st.session_state.get('ligand_prep_mode') or 'dimorphite'}`",
+            f"Input SMILES: `{st.session_state.get('input_smiles_final') or smiles_in}`",
+            f"Final SMILES used for docking: `{st.session_state.prot_smiles}`",
+            f"Net formal charge: `{st.session_state.get('ligand_charge')}`",
+            f"Charged atoms: `{_charged_atoms_txt}`",
+            f"Zwitterion: `{'YES' if st.session_state.get('ligand_is_zwitterion') else 'NO'}`",
+        ]
+        st.markdown("  \n".join(_summary_lines))
 
         c2d, c3d = st.columns(2)
         with c2d:
