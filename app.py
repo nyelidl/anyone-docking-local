@@ -3907,7 +3907,7 @@ st.markdown(
     "**pKaNET Cloud**, and **RDkit**."
 )
 st.markdown("**Basic** — single ligand. **Batch** — multiple ligands.")
-st.markdown("**☁️ Cloud-ready | 📱 Mobile-compatible**")
+st.markdown("**☁️ Run on locally | 🌐 web-based interface**")
 
 if VINA_PATH is None:
     st.error(f"❌ Could not download Vina binary: {_vina_err}")
