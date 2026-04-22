@@ -1975,6 +1975,11 @@ def write_single_pose(mol, path: str) -> None:
         w.write(mol)
 
 
+def write_single_pose_pdb(mol, path: str) -> None:
+    from rdkit import Chem
+    Chem.MolToPDBFile(mol, path)
+
+
 def convert_sdf_to_v2000(sdf_path: str) -> str:
     from rdkit import Chem, RDLogger
     out = sdf_path.replace(".sdf", "_v2000.sdf")
