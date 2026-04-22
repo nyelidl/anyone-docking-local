@@ -19,16 +19,20 @@ from pathlib import Path
 # ══════════════════════════════════════════════════════════════════════════════
 
 METAL_RESNAMES = {
-    "MG", "ZN", "CA", "MN", "FE", "CU", "CO", "NI", "CD", "HG", "NA", "K",
+    "MG", "ZN", "CA", "MN", "FE", "CU", "CO", "NI", "CD", "HG", "NA", "K", "HO",
+    "LA", "CE", "PR", "ND", "PM", "SM", "EU", "GD", "TB", "DY", "ER", "TM", "YB", "LU",
 }
 METAL_CHARGES = {
     "MG": 2.0, "ZN": 2.0, "CA": 2.0, "MN": 2.0, "FE": 3.0,
-    "CU": 2.0, "CO": 2.0, "NI": 2.0, "CD": 2.0, "HG": 2.0,
+    "CU": 2.0, "CO": 2.0, "NI": 2.0, "CD": 2.0, "HG": 2.0, "HO": 3.0,
+    "LA": 3.0, "CE": 3.0, "PR": 3.0, "ND": 3.0, "PM": 3.0, "SM": 3.0,
+    "EU": 3.0, "GD": 3.0, "TB": 3.0, "DY": 3.0, "ER": 3.0, "TM": 3.0,
+    "YB": 3.0, "LU": 3.0,
     "NA": 1.0, "K":  1.0,
 }
 
 EXCLUDE_IONS = set(
-    "HOH,WAT,DOD,SOL,NA,CL,K,CA,MG,ZN,MN,FE,CU,CO,NI,CD,HG".split(",")
+    "HOH,WAT,DOD,SOL,NA,CL,K,CA,MG,ZN,MN,FE,CU,CO,NI,CD,HG,HO,LA,CE,PR,ND,PM,SM,EU,GD,TB,DY,ER,TM,YB,LU".split(",")
 )
 GLYCAN_NAMES = {
     "NAG", "BMA", "MAN", "FUC", "GAL", "GLC", "SIA", "NGA",
@@ -44,6 +48,7 @@ COFACTOR_NAMES = {
     "IHP", "TTP", "CTP", "UTP",
     "COA", "SAM", "SAH",
     "EPE", "MES", "TRS", "ACT", "ACY",
+    "HO", "LA", "CE", "PR", "ND", "PM", "SM", "EU", "GD", "TB", "DY", "ER", "TM", "YB", "LU",
 }
 
 HEME_RESNAMES = {"HEM", "HEC", "HEA", "HEB", "HDD", "HDM"}
