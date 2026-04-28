@@ -73,6 +73,7 @@ except ImportError:
         "IHP", "TTP", "CTP", "UTP",
         "COA", "SAM", "SAH",
         "EPE", "MES", "TRS", "ACT", "ACY",
+        "HO", "LA", "CE", "PR", "ND", "PM", "SM", "EU", "GD", "TB", "DY", "ER", "TM", "YB", "LU",
     }
 
 try:
@@ -205,7 +206,7 @@ def _rcsb_entry_has_no_missing_residues(entry_json: dict):
     return None
 
 
-def _search_protein_rcsb(query: str, top_n: int = 12) -> list[dict]:
+def _search_protein_rcsb(query: str, top_n: int = 25) -> list[dict]:
     """
     Search RCSB by protein/keyword and return entry summaries.
     Uses Search API for IDs, then Data API for metadata.
@@ -323,8 +324,27 @@ def _search_protein_rcsb(query: str, top_n: int = 12) -> list[dict]:
 #  ADME PROPERTIES — RDKit local calculation
 # ══════════════════════════════════════════════════════════════════════════════
 
+@st.cache_resource(show_spinner="Loading ADMET-AI models (first run only)…")
+def _load_admet_model():
+    """Load and cache the ADMET-AI ADMETModel. Returns None if not installed."""
+    try:
+        from admet_ai import ADMETModel
+        return ADMETModel()
+    except ImportError:
+        return None
+    except Exception:
+        return None
+
+
 def _calc_adme_properties(smiles: str) -> dict:
-    """Calculate ADME properties with RDKit (no API, always works offline)."""
+    """
+    Calculate ADME/ADMET properties.
+
+    Part 1: RDKit physicochemical descriptors (always available, offline).
+    Part 2: ADMET-AI ML predictions (requires: pip install admet-ai).
+            Falls back gracefully to rule-based estimates if unavailable.
+    All existing dict keys are preserved for backward compatibility.
+    """
     try:
         from rdkit import Chem
         from rdkit.Chem import Descriptors, rdMolDescriptors, QED
@@ -334,6 +354,7 @@ def _calc_adme_properties(smiles: str) -> dict:
         if mol is None:
             return {"error": "Invalid SMILES"}
 
+        # ── Part 1: RDKit descriptors (unchanged) ─────────────────────────
         mw      = round(Descriptors.MolWt(mol), 2)
         logp    = round(Descriptors.MolLogP(mol), 2)
         hbd     = rdMolDescriptors.CalcNumHBD(mol)
@@ -357,17 +378,6 @@ def _calc_adme_properties(smiles: str) -> dict:
             and hbd <= 5 and hba <= 10
         )
         bio_score = round(sum([lip_pass, veber_pass, egan_pass, muegge_pass]) / 4.0, 2)
-
-        gi = ("High" if (tpsa <= 131.6 and logp <= 5.88)
-              else "Low" if (tpsa > 200 or logp > 7) else "Medium")
-
-        bbb_pts = (
-            (1 if 1 <= logp <= 3 else 0) + (1 if tpsa <= 90 else 0)
-            + (1 if mw <= 450 else 0) + (1 if hbd <= 3 else 0)
-            + (1 if rings <= 4 else 0)
-        )
-        bbb = "Penetrant" if bbb_pts >= 4 else ("Possible" if bbb_pts >= 2 else "Non-penetrant")
-        pgp = "Likely" if (mw > 400 and (hba > 4 or rotb > 10)) else "Unlikely"
 
         _CYP = {
             "CYP1A2":  "[$([nH]1cncc1),$([n+]1cnccc1),$([NH]c1ccc2ccccc2n1)]",
@@ -402,7 +412,104 @@ def _calc_adme_properties(smiles: str) -> dict:
         except Exception:
             pass
 
+        # ── Part 2: ADMET-AI ML predictions ──────────────────────────────
+        ml_results   = {}
+        ml_source    = "rule-based (admet-ai not installed — pip install admet-ai)"
+        ml_error     = None
+        ml_available = False
+
+        try:
+            admet_model = _load_admet_model()
+            if admet_model is not None:
+                raw = admet_model.predict(smiles=smiles)
+                # Absorption
+                ml_results["caco2"]            = round(float(raw.get("Caco2_Wang", 0)), 3)
+                ml_results["hia"]              = round(float(raw.get("HIA_Hou", 0)), 3)
+                ml_results["pgp_substrate_ml"] = float(raw.get("Pgp_Broccatelli", 0)) > 0.5
+                ml_results["pgp_inhibitor"]    = float(raw.get("P-glycoprotein_Inhibitor_Broccatelli", 0)) > 0.5
+                ml_results["bioavailability_ml"] = round(float(raw.get("Bioavailability_Ma", 0)), 3)
+                ml_results["solubility"]       = round(float(raw.get("Solubility_AqSolDB", 0)), 3)
+                ml_results["lipophilicity_ml"] = round(float(raw.get("Lipophilicity_AstraZeneca", 0)), 3)
+                # Distribution
+                ml_results["bbb_prob"] = round(float(raw.get("BBB_Martins", 0)), 3)
+                ml_results["ppb"]      = round(float(raw.get("PPBR_AZ", 0)), 1)
+                ml_results["vdd"]      = round(float(raw.get("VDss_Lombardo", 0)), 3)
+                # CYP inhibition — ML overrides SMARTS flags when available
+                ml_results["cyp1a2_inh"]  = float(raw.get("CYP1A2_Veith", 0)) > 0.5
+                ml_results["cyp2c9_inh"]  = float(raw.get("CYP2C9_Veith", 0)) > 0.5
+                ml_results["cyp2c19_inh"] = float(raw.get("CYP2C19_Veith", 0)) > 0.5
+                ml_results["cyp2d6_inh"]  = float(raw.get("CYP2D6_Veith", 0)) > 0.5
+                ml_results["cyp3a4_inh"]  = float(raw.get("CYP3A4_Veith", 0)) > 0.5
+                ml_results["cyp1a2_prob"]  = round(float(raw.get("CYP1A2_Veith", 0)), 3)
+                ml_results["cyp2c9_prob"]  = round(float(raw.get("CYP2C9_Veith", 0)), 3)
+                ml_results["cyp2c19_prob"] = round(float(raw.get("CYP2C19_Veith", 0)), 3)
+                ml_results["cyp2d6_prob"]  = round(float(raw.get("CYP2D6_Veith", 0)), 3)
+                ml_results["cyp3a4_prob"]  = round(float(raw.get("CYP3A4_Veith", 0)), 3)
+                # CYP substrate
+                ml_results["cyp2c9_sub"]       = float(raw.get("CYP2C9_Substrate_CarbonMangels", 0)) > 0.5
+                ml_results["cyp2d6_sub"]       = float(raw.get("CYP2D6_Substrate_CarbonMangels", 0)) > 0.5
+                ml_results["cyp3a4_sub"]       = float(raw.get("CYP3A4_Substrate_CarbonMangels", 0)) > 0.5
+                ml_results["cyp2c9_sub_prob"]  = round(float(raw.get("CYP2C9_Substrate_CarbonMangels", 0)), 3)
+                ml_results["cyp2d6_sub_prob"]  = round(float(raw.get("CYP2D6_Substrate_CarbonMangels", 0)), 3)
+                ml_results["cyp3a4_sub_prob"]  = round(float(raw.get("CYP3A4_Substrate_CarbonMangels", 0)), 3)
+                # Excretion
+                ml_results["half_life"] = round(float(raw.get("Half_Life_Obach", 0)), 2)
+                ml_results["clearance"] = round(float(raw.get("Clearance_Hepatocyte_AZ", 0)), 2)
+                # Toxicity
+                ml_results["herg"]          = float(raw.get("hERG", 0)) > 0.5
+                ml_results["herg_prob"]     = round(float(raw.get("hERG", 0)), 3)
+                ml_results["ames"]          = float(raw.get("AMES", 0)) > 0.5
+                ml_results["ames_prob"]     = round(float(raw.get("AMES", 0)), 3)
+                ml_results["dili"]          = float(raw.get("DILI", 0)) > 0.5
+                ml_results["dili_prob"]     = round(float(raw.get("DILI", 0)), 3)
+                ml_results["skin_reaction"] = float(raw.get("Skin_Reaction_Martins", 0)) > 0.5
+                ml_results["skin_prob"]     = round(float(raw.get("Skin_Reaction_Martins", 0)), 3)
+                ml_results["ld50"]          = round(float(raw.get("LD50_Zhu", 0)), 2)
+                ml_source    = "ADMET-AI (Chemprop MPNN + TDC datasets)"
+                ml_available = True
+        except Exception as _ml_e:
+            ml_error  = str(_ml_e)
+            ml_source = f"rule-based (ADMET-AI error: {_ml_e})"
+
+        # ── Rule-based fallbacks (used when ML unavailable) ───────────────
+        if "bbb_prob" in ml_results:
+            bbb = ("Penetrant"     if ml_results["bbb_prob"] > 0.7
+                   else "Possible" if ml_results["bbb_prob"] > 0.4
+                   else "Non-penetrant")
+        else:
+            bbb_pts = (
+                (1 if 1 <= logp <= 3 else 0) + (1 if tpsa <= 90 else 0)
+                + (1 if mw <= 450 else 0) + (1 if hbd <= 3 else 0)
+                + (1 if rings <= 4 else 0)
+            )
+            bbb = ("Penetrant" if bbb_pts >= 4
+                   else "Possible" if bbb_pts >= 2 else "Non-penetrant")
+
+        if ml_results.get("pgp_substrate_ml") is not None:
+            pgp = "Likely" if ml_results["pgp_substrate_ml"] else "Unlikely"
+        else:
+            pgp = "Likely" if (mw > 400 and (hba > 4 or rotb > 10)) else "Unlikely"
+
+        if "bioavailability_ml" in ml_results:
+            gi = ("High"   if ml_results["bioavailability_ml"] > 0.7
+                  else "Medium" if ml_results["bioavailability_ml"] > 0.4
+                  else "Low")
+        else:
+            gi = ("High" if (tpsa <= 131.6 and logp <= 5.88)
+                  else "Low" if (tpsa > 200 or logp > 7) else "Medium")
+
+        # Override SMARTS CYP flags with ML predictions when available
+        if ml_available:
+            cyp_flags = {
+                "CYP1A2":  ml_results["cyp1a2_inh"],
+                "CYP2C9":  ml_results["cyp2c9_inh"],
+                "CYP2C19": ml_results["cyp2c19_inh"],
+                "CYP2D6":  ml_results["cyp2d6_inh"],
+                "CYP3A4":  ml_results["cyp3a4_inh"],
+            }
+
         return {
+            # Backward-compatible RDKit keys (unchanged)
             "mw": mw, "logp": logp, "hbd": hbd, "hba": hba,
             "tpsa": tpsa, "rotb": rotb, "rings": rings,
             "arom_rings": arom, "heavy_atoms": heavy,
@@ -414,6 +521,11 @@ def _calc_adme_properties(smiles: str) -> dict:
             "cyp_flags": cyp_flags,
             "pains_alerts": alerts_pains,
             "brenk_alerts": alerts_brenk,
+            # New ML keys (populated only when admet-ai is installed)
+            "ml_results":   ml_results,
+            "ml_source":    ml_source,
+            "ml_error":     ml_error,
+            "ml_available": ml_available,
         }
     except Exception as e:
         return {"error": str(e)}
@@ -445,9 +557,10 @@ def _adme_section(
         )
     with _col_hint:
         st.caption(
-            "Calculated locally via **RDKit** — MW, LogP, TPSA, HBD/HBA, "
-            "Lipinski/Veber/Egan/Muegge rules, GI absorption, BBB, "
-            "CYP flags, PAINS/BRENK alerts."
+            "Calculated locally via **RDKit** (always available) + "
+            "**ADMET-AI ML** if installed (`pip install admet-ai`). "
+            "Covers MW, LogP, TPSA, HBD/HBA, Lipinski/Veber rules, "
+            "GI/BBB/P-gp, CYP, hERG/AMES/DILI, PPB, VDd, half-life, LD50, PAINS/BRENK."
         )
 
     if _clicked:
@@ -460,6 +573,30 @@ def _adme_section(
     if "error" in props:
         st.error(f"ADME calculation error: {props['error']}")
         return
+
+    # ── ML source banner ──────────────────────────────────────────────────────
+    _ml_avail = props.get("ml_available", False)
+    _ml_src   = props.get("ml_source", "")
+    _ml_err   = props.get("ml_error")
+    _ml_res   = props.get("ml_results", {})
+    if _ml_avail:
+        st.markdown(
+            f'<div style="display:inline-flex;align-items:center;gap:6px;'
+            f'background:#EAF3E5;border:1.5px solid #4CAF50;border-radius:20px;'
+            f'padding:4px 14px;font-size:12px;font-weight:600;color:#2e7d32;margin-bottom:6px;">'
+            f'🤖 {_ml_src}</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f'<div style="display:inline-flex;align-items:center;gap:6px;'
+            f'background:#FFF8E1;border:1.5px solid #FFA000;border-radius:20px;'
+            f'padding:4px 14px;font-size:12px;font-weight:600;color:#e65100;margin-bottom:6px;">'
+            f'⚠️ Rule-based estimates only'
+            + (f' — {_ml_err}' if _ml_err else ' — pip install admet-ai for ML predictions')
+            + '</div>',
+            unsafe_allow_html=True,
+        )
 
     # ── Metric card helper ────────────────────────────────────────────────
     def _mc(label, value, unit="", status=None):
@@ -594,6 +731,98 @@ def _adme_section(
         unsafe_allow_html=True,
     )
     st.caption("Structural SMARTS flags only — screening purpose, not quantitative.")
+
+    # ── ML Toxicity ───────────────────────────────────────────────────────────
+    if _ml_avail and _ml_res.get("herg") is not None:
+        st.markdown("#### ☠️ Toxicity Predictions (ADMET-AI ML)")
+        _tc = st.columns(4)
+        for _col, (_lbl, _fkey, _pkey, _tip) in zip(_tc, [
+            ("hERG inhibition",   "herg",         "herg_prob",
+             "Cardiac toxicity risk — QT prolongation"),
+            ("AMES mutagenicity", "ames",          "ames_prob",
+             "Genotoxicity risk"),
+            ("DILI (liver)",      "dili",          "dili_prob",
+             "Drug-induced liver injury"),
+            ("Skin reaction",     "skin_reaction", "skin_prob",
+             "Skin sensitization"),
+        ]):
+            _flag = _ml_res.get(_fkey, False)
+            _prob = _ml_res.get(_pkey)
+            _bg   = "#FFEBE9" if _flag else "#DAFBE1"
+            _clr  = "#CF222E" if _flag else "#1A7F37"
+            _ico  = "⚠ Positive" if _flag else "✓ Negative"
+            _col.markdown(
+                f'<div style="background:{_bg};border:1.5px solid {_clr};'
+                f'border-radius:8px;padding:10px;text-align:center;" title="{_tip}">'
+                f'<div style="font-size:11px;font-weight:600;color:{_clr};">{_lbl}</div>'
+                f'<div style="font-size:15px;font-weight:700;color:{_clr};">{_ico}</div>'
+                + (f'<div style="font-size:10px;color:#888;">p = {_prob:.3f}</div>'
+                   if _prob is not None else "")
+                + '</div>',
+                unsafe_allow_html=True,
+            )
+        _tc2 = st.columns(3)
+        for _col2, (_lbl2, _key2, _unit2) in zip(_tc2, [
+            ("LD50 (oral)",          "ld50",      "mg/kg"),
+            ("Half-life",            "half_life", "hr"),
+            ("Hepatic clearance",    "clearance", "mL/min/g"),
+        ]):
+            _v2 = _ml_res.get(_key2)
+            if _v2 is not None:
+                _col2.metric(_lbl2, f"{_v2} {_unit2}")
+
+    # ── CYP substrate (ML) ────────────────────────────────────────────────────
+    if _ml_avail and _ml_res.get("cyp2c9_sub") is not None:
+        st.markdown("#### CYP Substrate Predictions (ADMET-AI ML)")
+        _cyp_sub_cols = st.columns(3)
+        for _col3, (_cn3, _sk3, _pk3) in zip(_cyp_sub_cols, [
+            ("CYP2C9", "cyp2c9_sub", "cyp2c9_sub_prob"),
+            ("CYP2D6", "cyp2d6_sub", "cyp2d6_sub_prob"),
+            ("CYP3A4", "cyp3a4_sub", "cyp3a4_sub_prob"),
+        ]):
+            _v3 = _ml_res.get(_sk3, False)
+            _p3 = _ml_res.get(_pk3)
+            _bg3  = "#FFF8C5" if _v3 else "#DAFBE1"
+            _clr3 = "#9A6700" if _v3 else "#1A7F37"
+            _lbl3 = "⚠ Substrate" if _v3 else "✓ Non-substrate"
+            _col3.markdown(
+                f'<div style="background:{_bg3};border:1.5px solid {_clr3};'
+                f'border-radius:8px;padding:8px;text-align:center;">'
+                f'<div style="font-size:11px;font-weight:600;color:{_clr3};">{_cn3}</div>'
+                f'<div style="font-size:13px;font-weight:700;color:{_clr3};">{_lbl3}</div>'
+                + (f'<div style="font-size:10px;color:#888;">p = {_p3:.3f}</div>'
+                   if _p3 is not None else "")
+                + '</div>',
+                unsafe_allow_html=True,
+            )
+
+    # ── PPB + VDd (ML) ────────────────────────────────────────────────────────
+    if _ml_avail and _ml_res.get("ppb") is not None:
+        _pp1, _pp2 = st.columns(2)
+        with _pp1:
+            _ppb_v = _ml_res["ppb"]
+            _ppb_c = "#CF222E" if _ppb_v > 90 else "#9A6700" if _ppb_v > 70 else "#1A7F37"
+            st.markdown(
+                f'<div style="border:1.5px solid {_ppb_c};border-radius:8px;padding:12px;">'
+                f'<div style="font-size:11px;font-weight:600;">Plasma Protein Binding (PPB)</div>'
+                f'<div style="font-size:20px;font-weight:700;color:{_ppb_c};">{_ppb_v:.1f}%</div>'
+                f'<div style="font-size:11px;color:#888;">'
+                + ("High — low free fraction" if _ppb_v > 90 else "Moderate" if _ppb_v > 70 else "Low binding")
+                + '</div></div>',
+                unsafe_allow_html=True,
+            )
+        with _pp2:
+            _vdd_v = _ml_res.get("vdd")
+            if _vdd_v is not None:
+                st.markdown(
+                    f'<div style="border:1.5px solid #888;border-radius:8px;padding:12px;">'
+                    f'<div style="font-size:11px;font-weight:600;">Volume of Distribution (VDd)</div>'
+                    f'<div style="font-size:20px;font-weight:700;">{_vdd_v:.2f} L/kg</div>'
+                    f'<div style="font-size:11px;color:#888;">'
+                    + ("Extensive tissue distribution" if _vdd_v > 0.6 else "Moderate" if _vdd_v > 0.2 else "Mainly in plasma")
+                    + '</div></div>',
+                    unsafe_allow_html=True,
+                )
 
     # ── Structural alerts ─────────────────────────────────────────────────
     st.markdown("#### Structural Alerts")
@@ -3390,10 +3619,24 @@ def _receptor_section(pfx: str, wdir: Path, step_label: str):
                     )
                     if _picked.get("title"):
                         st.caption(_picked["title"])
-                    if st.button("Use selected PDB ID", key=pfx + "use_selected_pdb", type="primary"):
-                        st.session_state[pfx + "pdb_id"] = _picked["pdb_id"]
-                        st.session_state[pfx + "pdb_token"] = _picked["pdb_id"]
-                        st.rerun()
+                    _btn_col, _link_col = st.columns([2, 1.2])
+                    with _btn_col:
+                        if st.button("Use selected PDB ID", key=pfx + "use_selected_pdb", type="primary"):
+                            st.session_state[pfx + "pdb_id"] = _picked["pdb_id"]
+                            st.session_state[pfx + "pdb_token"] = _picked["pdb_id"]
+                            st.rerun()
+                    with _link_col:
+                        _rcsb_url = f"https://www.rcsb.org/structure/{_picked['pdb_id']}"
+                        st.markdown(
+                            f'<a href="{_rcsb_url}" target="_blank" style="'
+                            f'display:inline-flex;align-items:center;gap:6px;'
+                            f'padding:7px 14px;border-radius:6px;'
+                            f'background:#F6F8FA;border:1px solid #D0D7DE;'
+                            f'color:#24292F;text-decoration:none;'
+                            f'font-size:0.84rem;white-space:nowrap;">'
+                            f'🔗 View on RCSB</a>',
+                            unsafe_allow_html=True,
+                        )
 
             _id_col, _fmt_col = st.columns([1.5, 1])
             with _id_col:
@@ -3924,7 +4167,7 @@ st.markdown(
     "**pKaNET Cloud**, and **RDkit**."
 )
 st.markdown("**Basic** — single ligand. **Batch** — multiple ligands.")
-st.markdown("**☁️ Run on your local machine | 🌐 web-based interface**")
+st.markdown("**☁️ Cloud-ready | 📱 Mobile-compatible**")
 
 if VINA_PATH is None:
     st.error(f"❌ Could not download Vina binary: {_vina_err}")
@@ -4586,6 +4829,32 @@ with tab_basic:
                 if st.session_state.receptor_fh and os.path.exists(st.session_state.receptor_fh):
                     st.download_button("⬇ Receptor (.pdb)", open(st.session_state.receptor_fh, "rb"),
                         file_name="receptor.pdb", key="dl_rec", width='stretch')
+
+                st.markdown("---")
+                st.markdown("**📷 Snapshot**")
+                if st.button(
+                    "Capture view",
+                    key=f"btn_capture_{pose_idx}",
+                    help="Capture the current 3D viewer as a PNG image.",
+                ):
+                    try:
+                        _png = v2.png()
+                        if _png and len(_png) > 100:
+                            st.session_state[f"pose_png_{pose_idx}"] = _png
+                        else:
+                            st.warning("Could not capture image from viewer.")
+                    except Exception as _pe:
+                        st.warning(f"Capture failed: {_pe}")
+                _saved_png = st.session_state.get(f"pose_png_{pose_idx}")
+                if _saved_png:
+                    st.download_button(
+                        "⬇ PNG",
+                        data=_saved_png,
+                        file_name=f"pose_{pose_idx+1}.png",
+                        mime="image/png",
+                        key=f"dl_png_{pose_idx}",
+                        width='stretch',
+                    )
 
             st.markdown("---")
 
