@@ -324,14 +324,32 @@ def _search_protein_rcsb(query: str, top_n: int = 25) -> list[dict]:
 #  ADME PROPERTIES — RDKit local calculation
 # ══════════════════════════════════════════════════════════════════════════════
 
-@st.cache_resource(show_spinner="Loading ADMET-AI models (first run only)…")
+# ใหม่ (แทนที่ด้วยอันนี้)
+@st.cache_resource(show_spinner="Installing & loading ADMET-AI (first run only, ~2 min)…")
 def _load_admet_model():
-    """Load and cache the ADMET-AI ADMETModel. Returns None if not installed."""
+    import subprocess
+    import sys
     try:
         from admet_ai import ADMETModel
         return ADMETModel()
     except ImportError:
-        return None
+        pass
+    try:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "admet-ai", "-q"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        try:
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "admet-ai"]
+            )
+        except Exception:
+            return None
+    try:
+        from admet_ai import ADMETModel
+        return ADMETModel()
     except Exception:
         return None
 
