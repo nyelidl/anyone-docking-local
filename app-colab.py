@@ -2538,6 +2538,14 @@ def _ready_figure_section(
             ["🧬 Anyone Can Dock", "🔬 RDKit", "🔬 PoseView"],
             horizontal=True,
             key=f"rtf_src_{mode}",
+            help=(
+                "Source for the 2D ligand-receptor interaction diagram.\n\n"
+                "📖 Anyone Can Dock : custom SVG, fast, offline.\n"
+                "   RDKit           : RDKit highlight-style, fast, offline.\n"
+                "   PoseView        : proteins.plus REST API, publication quality.\n"
+                "⚙️ Use ACD/RDKit for offline work or rapid iteration.\n"
+                "⚠️ PoseView requires internet access and may be slow (10–60 s)."
+            ),
         )
         _src_key = "acd" if "Anyone" in _src else ("rdkit" if "RDKit" in _src else "poseview")
 
@@ -2554,11 +2562,35 @@ def _ready_figure_section(
 
         _ctl1, _ctl2, _ctl3 = st.columns(3)
         with _ctl1:
-            _cutoff = st.slider("Pocket cutoff (Å)", 2.5, 5.0, 3.5, 0.1, key=f"rtf_cutoff_{mode}")
+            _cutoff = st.slider(
+                "Pocket cutoff (Å)", 2.5, 5.0, 3.5, 0.1, key=f"rtf_cutoff_{mode}",
+                help=(
+                    "Distance cutoff for residues shown in the figure diagram.\n\n"
+                    "📖 Residues within this distance → drawn as labeled circles.\n"
+                    "⚙️ 4.0–4.5 Å captures most meaningful interactions.\n"
+                    "⚠️ Larger cutoff = more residues = more crowded diagram."
+                ),
+            )
         with _ctl2:
-            _show_labels = st.checkbox("Residue labels", value=True, key=f"rtf_lbl_{mode}")
+            _show_labels = st.checkbox(
+                "Residue labels", value=True, key=f"rtf_lbl_{mode}",
+                help=(
+                    "Show residue labels in the figure's 3D panel.\n\n"
+                    "📖 Labels appear as overlaid text on the protein in the PNG.\n"
+                    "⚙️ Keep ON for analysis figures, OFF for presentation slides.\n"
+                    "⚠️ Dense pockets → overlapping labels."
+                ),
+            )
         with _ctl3:
-            _show_surf = st.checkbox("Protein surface", value=False, key=f"rtf_surf_{mode}")
+            _show_surf = st.checkbox(
+                "Protein surface", value=False, key=f"rtf_surf_{mode}",
+                help=(
+                    "Render protein surface in the figure's 3D panel.\n\n"
+                    "📖 SES surface shows the cavity shape around the ligand.\n"
+                    "⚙️ Enable for shape complementarity visualization.\n"
+                    "⚠️ Surface rendering adds GPU load — may be slow for large proteins."
+                ),
+            )
 
         # ── Panel b) Pose Browser selectors (4-panel batch only) ─────────────
         if mode == "batch" and _4panel and b_browsable:
@@ -2949,11 +2981,26 @@ def _poseview_ui(
             _cl, _cr = st.columns(2)
             with _cl:
                 _cutoff = st.slider(
-                    "Cutoff (Å)", 2.5, 5.5, 4.5, 0.1, key=btn_key + "_cut"
+                    "Cutoff (Å)", 2.5, 5.5, 4.5, 0.1, key=btn_key + "_cut",
+                    help=(
+                        "Interaction distance cutoff for the 2D diagram (Å).\n\n"
+                        "📖 Residues within this distance → drawn as labeled circles.\n"
+                        "⚙️ 4.0–4.5 Å = captures most meaningful interactions.\n"
+                        "⚠️ < 3.0 Å may miss hydrophobic contacts.\n"
+                        "   > 5.0 Å clutters the diagram with weak contacts."
+                    ),
                 )
             with _cr:
                 _maxres = st.slider(
-                    "Max residues", 4, 20, 14, 1, key=btn_key + "_max"
+                    "Max residues", 4, 20, 14, 1, key=btn_key + "_max",
+                    help=(
+                        "Max residues shown in the 2D interaction diagram.\n\n"
+                        "📖 Top N by priority (metal > ionic > H-bond > hydrophobic).\n"
+                        "⚙️ 10–14 : standard (default).\n"
+                        "    6–8  : simple ligands with few contacts.\n"
+                        "   18–20 : complex multi-residue interactions.\n"
+                        "⚠️ Too many residues → unreadable diagram."
+                    ),
                 )
 
             if st.button("🧬 Generate", key=btn_key + "_gen", type="primary"):
@@ -3537,6 +3584,14 @@ def _receptor_section(pfx: str, wdir: Path, step_label: str):
         src = st.radio(
             "Structure source", ["Download from RCSB", "Upload PDB / CIF file"],
             horizontal=True, key=pfx + "src_mode",
+            help=(
+                "Source of the protein 3D structure.\n\n"
+                "📖 Download = fetch from RCSB using a 4-letter PDB ID.\n"
+                "   Upload  = use your own .pdb or .cif file.\n"
+                "⚙️ Use Upload for homology models or pre-prepared structures.\n"
+                "⚠️ CIF recommended for large entries (>100 kDa) — "
+                "PDB truncates at 99,999 atoms."
+            ),
         )
         if src == "Download from RCSB":
             with st.expander("🔎 Search protein / target in RCSB", expanded=False):
@@ -3558,6 +3613,13 @@ def _receptor_section(pfx: str, wdir: Path, step_label: str):
                         "Prefer no missing residues",
                         value=True,
                         key=pfx + "rcsb_prefer_complete",
+                        help=(
+                            "Prefer RCSB entries where all residues are modelled.\n\n"
+                            "📖 Missing residues = structural gaps.\n"
+                            "   Gaps near the binding site reduce docking reliability.\n"
+                            "⚙️ Keep ON for most targets (default).\n"
+                            "⚠️ Even 'complete' structures may have flexible loops."
+                        ),
                     )
                 with _pref_col2:
                     _sort_best_res = st.checkbox(
@@ -3568,7 +3630,7 @@ def _receptor_section(pfx: str, wdir: Path, step_label: str):
 
                 if _search_clicked and _rcsb_query.strip():
                     with st.spinner(f"Searching RCSB for '{_rcsb_query}'…"):
-                        _hits = _search_protein_rcsb(_rcsb_query.strip(), top_n=12)
+                        _hits = _search_protein_rcsb(_rcsb_query.strip(), top_n=30)
                         if _prefer_complete:
                             _hits = sorted(
                                 _hits,
@@ -3640,12 +3702,27 @@ def _receptor_section(pfx: str, wdir: Path, step_label: str):
 
             _id_col, _fmt_col = st.columns([1.5, 1])
             with _id_col:
-                pdb_id = st.text_input("PDB ID", value="1M17", max_chars=4, key=pfx + "pdb_id")
+                pdb_id = st.text_input(
+                    "PDB ID", value="1M17", max_chars=4, key=pfx + "pdb_id",
+                    help=(
+                        "4-letter Protein Data Bank identifier (e.g. 1M17, 4AGN).\n\n"
+                        "📖 Each ID is a unique experimental structure.\n"
+                        "   Same protein can have many IDs with different resolutions.\n"
+                        "⚙️ Prefer resolution < 2.5 Å, no missing residues.\n"
+                        "⚠️ Different PDB entries of the same protein can give different results."
+                    ),
+                )
             with _fmt_col:
                 rcsb_fmt = st.radio(
                     "Format", ["PDB", "CIF"],
                     horizontal=True, key=pfx + "rcsb_fmt",
-                    help="CIF recommended for large/newer entries.",
+                    help=(
+                        "File format to download from RCSB.\n\n"
+                        "📖 PDB = classic format, widely compatible.\n"
+                        "   CIF = modern mmCIF, required for large structures.\n"
+                        "⚙️ Use CIF if the protein has > 62 chains or > 99,999 atoms.\n"
+                        "⚠️ If PDB download fails, try CIF."
+                    ),
                 )
             upload_file = None
         else:
@@ -3664,6 +3741,14 @@ def _receptor_section(pfx: str, wdir: Path, step_label: str):
                 "Select by atom selection (ProDy)",
             ],
             horizontal=True, key=pfx + "center_mode",
+            help=(
+                "How to set the center of the docking search box.\n\n"
+                "📖 The box MUST cover the binding site — wrong center = wrong region.\n"
+                "⚙️ Auto-detect: best when a co-crystal ligand is in the PDB.\n"
+                "   Manual XYZ : enter coordinates from a known binding site.\n"
+                "   ProDy sel  : select by residue/chain string.\n"
+                "⚠️ If no ligand is found, grid defaults to protein centroid."
+            ),
         )
         if center_mode == "Auto-detect co-crystal ligand":
             # ── Multi-ligand selector ─────────────────────────────────────
@@ -3722,19 +3807,42 @@ def _receptor_section(pfx: str, wdir: Path, step_label: str):
                 "ProDy selection string",
                 value="resid 702 820 and chain A",
                 key=pfx + "mda_sel",
+                help=(
+                    "ProDy atom selection — centroid of selected atoms becomes the box center.\n\n"
+                    "📖 Examples:\n"
+                    "   resid 702 and chain A\n"
+                    "   resname ATP and chain B\n"
+                    "⚙️ Use residue numbers from literature or binding site databases.\n"
+                    "⚠️ Chain IDs must match exactly — check your PDB file header."
+                ),
             )
             st.caption("💡 `resname LIG and chain A` · `resid 701 and chain A`")
 
     with col_b:
         st.markdown("**Search box size (Å)**")
-        sx = st.slider("X size", 10, 40, 16, 2, key=pfx + "sx")
-        sy = st.slider("Y size", 10, 40, 16, 2, key=pfx + "sy")
-        sz = st.slider("Z size", 10, 40, 16, 2, key=pfx + "sz")
+        _box_help = (
+            "Docking search box size along this axis (Å).\n\n"
+            "📖 Vina only searches for poses that fit within this box.\n"
+            "⚙️ 16–20 Å : most drug-like molecules (default).\n"
+            "   24–30 Å : large ligands or flexible loops.\n"
+            "   12 Å    : tight rigid pockets.\n"
+            "⚠️ Box > 30 Å significantly increases calculation time."
+        )
+        sx = st.slider("X size", 10, 40, 16, 2, key=pfx + "sx", help=_box_help)
+        sy = st.slider("Y size", 10, 40, 16, 2, key=pfx + "sy", help=_box_help)
+        sz = st.slider("Z size", 10, 40, 16, 2, key=pfx + "sz", help=_box_help)
         st.markdown(f"Box volume: **{sx*sy*sz:,} Å³**")
 
     blind = st.checkbox(
         "🔍 Blind docking (cover whole protein)",
         value=False, key=pfx + "blind_docking",
+        help=(
+            "Expand the search box to cover the entire protein.\n\n"
+            "📖 Use when the binding site is completely unknown.\n"
+            "⚙️ Enable for novel targets with no structural data.\n"
+            "⚠️ 5–20× slower than focused docking — less reliable results.\n"
+            "   Use to identify candidate sites, then re-dock with a focused box."
+        ),
     )
     if blind:
         st.caption("⚠️ Blind docking — box will cover entire protein extent.")
@@ -4167,7 +4275,7 @@ st.markdown(
     "**pKaNET Cloud**, and **RDkit**."
 )
 st.markdown("**Basic** — single ligand. **Batch** — multiple ligands.")
-st.markdown("**☁️ Run on Google Colab | 🌐 web-based interface**")
+st.markdown("**🖥️ Run locally | 🌐 web-based interface**")
 
 if VINA_PATH is None:
     st.error(f"❌ Could not download Vina binary: {_vina_err}")
@@ -4209,6 +4317,14 @@ with tab_basic:
         "Input mode",
         ["PubChem / SMILES", "Upload structure (.pdb/.mol2)", "Draw structure (Ketcher)"],
         horizontal=True, key="lig_input_mode",
+        help=(
+            "How to provide the ligand structure.\n\n"
+            "📖 PubChem/SMILES : text-based molecule representation.\n"
+            "   Upload          : use an existing 3D file (.sdf/.mol2/.pdb).\n"
+            "   Ketcher         : draw the structure interactively.\n"
+            "⚙️ Use SMILES for known drugs — search PubChem by name.\n"
+            "⚠️ Uploaded files skip protonation — ensure correct H atoms."
+        ),
     )
 
     if st.session_state.get("lig_input_mode") == "SMILES string":
@@ -4266,6 +4382,14 @@ with tab_basic:
         smiles_in = st.text_input(
             "SMILES string",
             key="smiles_in",
+            help=(
+                "SMILES string for the ligand (e.g. CCO = ethanol).\n\n"
+                "📖 Text representation of molecular structure.\n"
+                "⚙️ Copy from PubChem, ChEMBL, or DrugBank.\n"
+                "   Use the search box above to auto-fill from compound name.\n"
+                "⚠️ Include correct stereochemistry (@/@@) if chiral centers exist.\n"
+                "   Wrong stereochemistry = unreliable docking results."
+            ),
         )
     elif lig_input_mode == "Upload structure (.pdb/.mol2)":
         st.file_uploader(
@@ -4276,6 +4400,14 @@ with tab_basic:
             "Ligand preparation mode",
             ["Use the uploaded form", "Protonation at target pH"],
             horizontal=True, key="lig_upload_prot",
+            help=(
+                "How to handle hydrogens for an uploaded structure file.\n\n"
+                "📖 Use uploaded form : keep all atoms exactly as in the file.\n"
+                "   Protonate at pH   : re-run Dimorphite-DL on extracted SMILES.\n"
+                "⚙️ 'As uploaded' if file is already correctly prepared.\n"
+                "⚠️ 'As uploaded' skips all protonation checks.\n"
+                "   Incorrect H atoms = poor docking quality."
+            ),
         )
     else:
         try:
@@ -4292,8 +4424,27 @@ with tab_basic:
 
     if "lig_name_in" not in st.session_state:
         st.session_state["lig_name_in"] = st.session_state.get("lig_name_from_pubchem", "ELR")
-    lig_name_in = st.text_input("Output name", key="lig_name_in")
-    ph_in       = st.number_input("Target pH", 0.0, 14.0, 7.4, 0.1, key="ph_in")
+    lig_name_in = st.text_input(
+        "Output name", key="lig_name_in",
+        help=(
+            "Short identifier used to name output files.\n\n"
+            "📖 Used for: name.pdbqt, name_out.sdf, name_scores.csv.\n"
+            "⚙️ Keep it short and descriptive (e.g. Erlotinib, Cpd_01).\n"
+            "⚠️ No spaces or special characters — use underscores instead."
+        ),
+    )
+    ph_in = st.number_input(
+        "Target pH", 0.0, 14.0, 7.4, 0.1, key="ph_in",
+        help=(
+            "pH used to calculate the ligand protonation state.\n\n"
+            "📖 pH determines which atoms are charged.\n"
+            "   Amines (pKa ~10) are +1 at pH 7.4.\n"
+            "   Carboxylic acids (pKa ~4.5) are -1 at pH 7.4.\n"
+            "⚙️ 7.4 = plasma/cytosol (default).\n"
+            "   6.5 = tumor microenvironment.   5.0 = lysosome.\n"
+            "⚠️ Wrong pH can shift net charge ±1 — large effect on affinity."
+        ),
+    )
     st.caption("Default ligand preparation uses Dimorphite-DL at the target pH, then reports the RDKit formal charge of the final SMILES.")
 
     # ── Protonation mode ──────────────────────────────────────────────────────
@@ -4438,9 +4589,39 @@ with tab_basic:
 
     cd1, cd2 = st.columns([1.5, 1])
     with cd1:
-        exh = st.slider("Exhaustiveness", 4, 64, 16, 2, key="exh_slider")
-        nm  = st.slider("Number of poses", 5, 20, 10, 1, key="n_modes")
-        er  = st.slider("Energy range (kcal/mol)", 1, 5, 3, 1, key="e_range")
+        exh = st.slider(
+            "Exhaustiveness", 4, 64, 16, 2, key="exh_slider",
+            help=(
+                "Search thoroughness — higher = more reliable, slower.\n\n"
+                "📖 Controls number of Monte Carlo steps Vina performs.\n"
+                "⚙️ 8  = quick test / screening.\n"
+                "   16 = standard work (default).\n"
+                "   32 = publication quality.\n"
+                "   64 = maximum (~30–60 min per ligand).\n"
+                "⚠️ Run time ∝ exhaustiveness — plan accordingly."
+            ),
+        )
+        nm  = st.slider(
+            "Number of poses", 5, 20, 10, 1, key="n_modes",
+            help=(
+                "Maximum number of binding poses to output.\n\n"
+                "📖 Poses ranked best (1) to worst by binding affinity.\n"
+                "⚙️ 9–10 : standard (default).\n"
+                "   15–20 : when diverse alternative poses are needed.\n"
+                "⚠️ More poses does not improve the best result.\n"
+                "   Poses below rank 5 are often unreliable."
+            ),
+        )
+        er  = st.slider(
+            "Energy range (kcal/mol)", 1, 5, 3, 1, key="e_range",
+            help=(
+                "Max allowed energy gap from the best pose (kcal/mol).\n\n"
+                "📖 Poses worse than (best + range) are discarded.\n"
+                "   Example: best = -9.0, range = 3 → discard above -6.0.\n"
+                "⚙️ 3 kcal/mol = standard (default).\n"
+                "⚠️ Large range + many poses can produce low-quality output."
+            ),
+        )
     with cd2:
         est = max(1, exh // 8)
         st.markdown(
@@ -4457,12 +4638,26 @@ with tab_basic:
         st.markdown("**Redocking validation**")
         do_redock = st.checkbox(
             "Dock co-crystal ligand as reference", value=False, key="do_redock",
+            help=(
+                "Re-dock the known co-crystal ligand as a validation control.\n\n"
+                "📖 If RMSD ≤ 2 Å vs crystal pose, the protocol is validated.\n"
+                "   Score = reference baseline for comparing your ligand.\n"
+                "⚙️ Enable when a co-crystal ligand exists in the PDB entry.\n"
+                "⚠️ RMSD > 2 Å = protocol issues — check box placement and SMILES."
+            ),
         )
         if do_redock:
             st.text_input(
                 "Co-crystal SMILES [name]",
                 value="COCCOC1=C(C=C2C(=C1)C(=NC=N2)NC3=CC=CC(=C3)C#C)OCCOC Erlotinib",
                 key="redock_smiles",
+                help=(
+                    "SMILES and name for the redocking reference ligand.\n"
+                    "Format: SMILES LigandName (space-separated).\n\n"
+                    "📖 Name labels output files and score plots.\n"
+                    "⚙️ Copy SMILES from PubChem or ChEMBL.\n"
+                    "⚠️ SMILES must exactly match the PDB co-crystal ligand chemistry."
+                ),
             )
             st.caption("Score shown as dashed reference line in plot.")
 
@@ -4738,7 +4933,16 @@ with tab_basic:
 
         # ── Animated Pose Viewer ──────────────────────────────────────────
         st.markdown("**🎬 Animated Pose Viewer**")
-        anim_spd = st.slider("Interval (ms)", 500, 3000, 1500, 250, key="anim_spd")
+        anim_spd = st.slider(
+            "Interval (ms)", 500, 3000, 1500, 250, key="anim_spd",
+            help=(
+                "Interval between frames in the pose animation (milliseconds).\n\n"
+                "📖 Lower = faster cycling. Higher = longer per pose.\n"
+                "⚙️ 500 ms  = quick overview of all poses.\n"
+                "   1500 ms = default, comfortable viewing speed.\n"
+                "   3000 ms = slow, careful inspection per pose."
+            ),
+        )
         if st.session_state.output_sdf and os.path.exists(st.session_state.output_sdf):
             sdf_txt = open(st.session_state.output_sdf).read()
             va = py3Dmol.view(width="100%", height=440)
@@ -4767,7 +4971,18 @@ with tab_basic:
         # ── Interactive Pose Selector ─────────────────────────────────────
         st.markdown("**🔎 Interactive Pose Selector**")
         if mols:
-            pose_idx = st.slider("Select pose", 1, len(mols), 1, key="pose_sel") - 1
+            pose_idx = st.slider(
+                "Select pose", 1, len(mols), 1, key="pose_sel",
+                help=(
+                    "Select which docking pose to inspect.\n\n"
+                    "📖 Pose 1 = best predicted binding affinity.\n"
+                    "   Higher poses = progressively less favorable.\n"
+                    "⚙️ Start with pose 1. Check pose 2–3 for alternative modes.\n"
+                    "⚠️ Pose rank ≠ biological relevance.\n"
+                    "   A slightly worse pose with better pharmacophore match "
+                    "may be more meaningful."
+                ),
+            ) - 1
             sel_mol  = mols[pose_idx]
 
             _cryst_pdb = st.session_state.get("ligand_pdb_path") or ""
@@ -4862,10 +5077,36 @@ with tab_basic:
             st.markdown("**🔬 Binding Pocket View**")
             _bpl, _bpr = st.columns([2, 1])
             with _bpl:
-                _cutoff = st.slider("Distance cutoff (A)", 2.5, 5.0, 3.5, 0.1, key="bp_cutoff")
+                _cutoff = st.slider(
+                    "Distance cutoff (A)", 2.5, 5.0, 3.5, 0.1, key="bp_cutoff",
+                    help=(
+                        "Max distance (Å) to count a residue as interacting with the ligand.\n\n"
+                        "📖 Residues within cutoff → shown as orange sticks + labeled.\n"
+                        "   < 3.5 Å : direct interactions (H-bond, ionic).\n"
+                        "   < 5.0 Å : includes hydrophobic contacts.\n"
+                        "⚙️ Start at 3.5 Å. Increase if too few residues shown.\n"
+                        "⚠️ > 5.0 Å includes irrelevant residues — clutters the view."
+                    ),
+                )
             with _bpr:
-                _show_labels  = st.checkbox("Show residue labels",  value=True,  key="bp_show_labels")
-                _show_surface = st.checkbox("Show protein surface",  value=False, key="bp_show_surface")
+                _show_labels  = st.checkbox(
+                    "Show residue labels",  value=True,  key="bp_show_labels",
+                    help=(
+                        "Show residue name + number + chain as 3D labels.\n\n"
+                        "📖 Yellow labels on each interacting residue in the viewer.\n"
+                        "⚙️ Enable for analysis, disable for clean screenshots.\n"
+                        "⚠️ Dense pockets → overlapping labels."
+                    ),
+                )
+                _show_surface = st.checkbox(
+                    "Show protein surface",  value=False, key="bp_show_surface",
+                    help=(
+                        "Render a solvent-excluded surface (SES) around the protein.\n\n"
+                        "📖 Shows the 3D shape of the binding pocket.\n"
+                        "⚙️ Enable to assess shape complementarity.\n"
+                        "⚠️ Increases GPU load — may be slow on mobile or large proteins."
+                    ),
+                )
 
             try:
                 vbp = py3Dmol.view(width="100%", height=440)
@@ -5018,6 +5259,14 @@ with tab_batch:
         b_input_mode = st.radio(
             "Input mode", ["SMILES list (text)", "Upload .smi file", "Upload structure files (.pdb/.mol2)"],
             key="b_input_mode",
+            help=(
+                "How to provide multiple ligands for batch docking.\n\n"
+                "📖 SMILES list    : type directly, one per line.\n"
+                "   Upload .smi    : file with one SMILES [name] per line.\n"
+                "   Structure files: .sdf/.mol2/.pdb files.\n"
+                "⚙️ SMILES list fastest for known compounds.\n"
+                "⚠️ All ligands share the same receptor, box, and parameters."
+            ),
         )
         if b_input_mode == "SMILES list (text)":
             st.text_area("One `SMILES [name]` per line",
@@ -5049,7 +5298,16 @@ with tab_batch:
 
     with col_b2:
         st.markdown("**Redocking validation**")
-        b_do_redock = st.checkbox("Dock co-crystal ligand as reference", value=True, key="b_do_redock")
+        b_do_redock = st.checkbox(
+            "Dock co-crystal ligand as reference", value=True, key="b_do_redock",
+            help=(
+                "Dock the reference co-crystal ligand as a validation control.\n\n"
+                "📖 Reference score = dashed red line in the batch score plot.\n"
+                "   Ligands scoring better than reference → prioritize for follow-up.\n"
+                "⚙️ Enable for any serious batch campaign.\n"
+                "⚠️ Adds one full docking run to total time."
+            ),
+        )
         if b_do_redock:
             st.text_input(
                 "Co-crystal SMILES [name]",
@@ -5057,8 +5315,27 @@ with tab_batch:
                 key="b_redock_smiles",
             )
         st.markdown("**Docking parameters**")
-        b_exh = st.slider("Exhaustiveness", 4, 32, 8, 2, key="b_exh")
-        b_nm  = st.slider("Poses per ligand", 5, 20, 10, 1, key="b_nm")
+        b_exh = st.slider(
+            "Exhaustiveness", 4, 32, 8, 2, key="b_exh",
+            help=(
+                "Search thoroughness per ligand (same as single-ligand mode).\n\n"
+                "📖 Lower = faster but potentially less accurate.\n"
+                "⚙️ 4–8  : initial screening of large libraries.\n"
+                "   16   : focused follow-up on promising hits.\n"
+                "⚠️ Total time = N ligands × time per ligand.\n"
+                "   20 ligands × exh 16 ≈ 20–60 min total."
+            ),
+        )
+        b_nm  = st.slider(
+            "Poses per ligand", 5, 20, 10, 1, key="b_nm",
+            help=(
+                "Max binding poses per ligand in batch mode.\n\n"
+                "📖 Pose 1 affinity = used for ranking across the batch.\n"
+                "⚙️ 5–9 : standard for batch screening.\n"
+                "⚠️ More poses → larger files, more memory.\n"
+                "   For 50+ ligands, keep poses ≤ 9."
+            ),
+        )
         b_er  = st.slider("Energy range (kcal/mol)", 1, 5, 3, 1, key="b_er")
 
     if not b_rec_done:
