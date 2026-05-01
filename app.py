@@ -324,44 +324,12 @@ def _search_protein_rcsb(query: str, top_n: int = 25) -> list[dict]:
 #  ADME PROPERTIES — RDKit local calculation
 # ══════════════════════════════════════════════════════════════════════════════
 
-# ใหม่ (แทนที่ด้วยอันนี้)
-@st.cache_resource(show_spinner="Installing & loading ADMET-AI (first run only, ~2 min)…")
-def _load_admet_model():
-    import subprocess
-    import sys
-    try:
-        from admet_ai import ADMETModel
-        return ADMETModel()
-    except ImportError:
-        pass
-    try:
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "admet-ai", "-q"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        try:
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "admet-ai"]
-            )
-        except Exception:
-            return None
-    try:
-        from admet_ai import ADMETModel
-        return ADMETModel()
-    except Exception:
-        return None
-
-
 def _calc_adme_properties(smiles: str) -> dict:
-    """
-    Calculate ADME/ADMET properties.
+    """Calculate ADME/ADMET properties.
 
-    Part 1: RDKit physicochemical descriptors (always available, offline).
+    Part 1: RDKit descriptors (always available, offline).
     Part 2: ADMET-AI ML predictions (requires: pip install admet-ai).
             Falls back gracefully to rule-based estimates if unavailable.
-    All existing dict keys are preserved for backward compatibility.
     """
     try:
         from rdkit import Chem
@@ -372,7 +340,7 @@ def _calc_adme_properties(smiles: str) -> dict:
         if mol is None:
             return {"error": "Invalid SMILES"}
 
-        # ── Part 1: RDKit descriptors (unchanged) ─────────────────────────
+        # ── Part 1: RDKit descriptors (unchanged from original) ───────────
         mw      = round(Descriptors.MolWt(mol), 2)
         logp    = round(Descriptors.MolLogP(mol), 2)
         hbd     = rdMolDescriptors.CalcNumHBD(mol)
@@ -431,9 +399,9 @@ def _calc_adme_properties(smiles: str) -> dict:
             pass
 
         # ── Part 2: ADMET-AI ML predictions ──────────────────────────────
-        ml_results   = {}
-        ml_source    = "rule-based (admet-ai not installed — pip install admet-ai)"
-        ml_error     = None
+        ml_results = {}
+        ml_source  = "rule-based (ADMET-AI not installed)"
+        ml_error   = None
         ml_available = False
 
         try:
@@ -452,7 +420,7 @@ def _calc_adme_properties(smiles: str) -> dict:
                 ml_results["bbb_prob"] = round(float(raw.get("BBB_Martins", 0)), 3)
                 ml_results["ppb"]      = round(float(raw.get("PPBR_AZ", 0)), 1)
                 ml_results["vdd"]      = round(float(raw.get("VDss_Lombardo", 0)), 3)
-                # CYP inhibition — ML overrides SMARTS flags when available
+                # CYP inhibition (ML replaces SMARTS flags)
                 ml_results["cyp1a2_inh"]  = float(raw.get("CYP1A2_Veith", 0)) > 0.5
                 ml_results["cyp2c9_inh"]  = float(raw.get("CYP2C9_Veith", 0)) > 0.5
                 ml_results["cyp2c19_inh"] = float(raw.get("CYP2C19_Veith", 0)) > 0.5
@@ -464,9 +432,9 @@ def _calc_adme_properties(smiles: str) -> dict:
                 ml_results["cyp2d6_prob"]  = round(float(raw.get("CYP2D6_Veith", 0)), 3)
                 ml_results["cyp3a4_prob"]  = round(float(raw.get("CYP3A4_Veith", 0)), 3)
                 # CYP substrate
-                ml_results["cyp2c9_sub"]       = float(raw.get("CYP2C9_Substrate_CarbonMangels", 0)) > 0.5
-                ml_results["cyp2d6_sub"]       = float(raw.get("CYP2D6_Substrate_CarbonMangels", 0)) > 0.5
-                ml_results["cyp3a4_sub"]       = float(raw.get("CYP3A4_Substrate_CarbonMangels", 0)) > 0.5
+                ml_results["cyp2c9_sub"]  = float(raw.get("CYP2C9_Substrate_CarbonMangels", 0)) > 0.5
+                ml_results["cyp2d6_sub"]  = float(raw.get("CYP2D6_Substrate_CarbonMangels", 0)) > 0.5
+                ml_results["cyp3a4_sub"]  = float(raw.get("CYP3A4_Substrate_CarbonMangels", 0)) > 0.5
                 ml_results["cyp2c9_sub_prob"]  = round(float(raw.get("CYP2C9_Substrate_CarbonMangels", 0)), 3)
                 ml_results["cyp2d6_sub_prob"]  = round(float(raw.get("CYP2D6_Substrate_CarbonMangels", 0)), 3)
                 ml_results["cyp3a4_sub_prob"]  = round(float(raw.get("CYP3A4_Substrate_CarbonMangels", 0)), 3)
@@ -486,12 +454,12 @@ def _calc_adme_properties(smiles: str) -> dict:
                 ml_source    = "ADMET-AI (Chemprop MPNN + TDC datasets)"
                 ml_available = True
         except Exception as _ml_e:
-            ml_error  = str(_ml_e)
+            ml_error = str(_ml_e)
             ml_source = f"rule-based (ADMET-AI error: {_ml_e})"
 
         # ── Rule-based fallbacks (used when ML unavailable) ───────────────
         if "bbb_prob" in ml_results:
-            bbb = ("Penetrant"     if ml_results["bbb_prob"] > 0.7
+            bbb = ("Penetrant" if ml_results["bbb_prob"] > 0.7
                    else "Possible" if ml_results["bbb_prob"] > 0.4
                    else "Non-penetrant")
         else:
@@ -501,7 +469,8 @@ def _calc_adme_properties(smiles: str) -> dict:
                 + (1 if rings <= 4 else 0)
             )
             bbb = ("Penetrant" if bbb_pts >= 4
-                   else "Possible" if bbb_pts >= 2 else "Non-penetrant")
+                   else "Possible" if bbb_pts >= 2
+                   else "Non-penetrant")
 
         if ml_results.get("pgp_substrate_ml") is not None:
             pgp = "Likely" if ml_results["pgp_substrate_ml"] else "Unlikely"
@@ -516,7 +485,7 @@ def _calc_adme_properties(smiles: str) -> dict:
             gi = ("High" if (tpsa <= 131.6 and logp <= 5.88)
                   else "Low" if (tpsa > 200 or logp > 7) else "Medium")
 
-        # Override SMARTS CYP flags with ML predictions when available
+        # Override CYP flags with ML predictions when available
         if ml_available:
             cyp_flags = {
                 "CYP1A2":  ml_results["cyp1a2_inh"],
@@ -527,7 +496,7 @@ def _calc_adme_properties(smiles: str) -> dict:
             }
 
         return {
-            # Backward-compatible RDKit keys (unchanged)
+            # RDKit descriptors (unchanged keys — backward compatible)
             "mw": mw, "logp": logp, "hbd": hbd, "hba": hba,
             "tpsa": tpsa, "rotb": rotb, "rings": rings,
             "arom_rings": arom, "heavy_atoms": heavy,
@@ -539,7 +508,7 @@ def _calc_adme_properties(smiles: str) -> dict:
             "cyp_flags": cyp_flags,
             "pains_alerts": alerts_pains,
             "brenk_alerts": alerts_brenk,
-            # New ML keys (populated only when admet-ai is installed)
+            # ML-specific results (new keys — only populated when ADMET-AI available)
             "ml_results":   ml_results,
             "ml_source":    ml_source,
             "ml_error":     ml_error,
@@ -547,6 +516,18 @@ def _calc_adme_properties(smiles: str) -> dict:
         }
     except Exception as e:
         return {"error": str(e)}
+
+
+@st.cache_resource(show_spinner="Loading ADMET-AI models (first run only)…")
+def _load_admet_model():
+    """Load and cache the ADMET-AI model. Returns None if not installed."""
+    try:
+        from admet_ai import ADMETModel
+        return ADMETModel()
+    except ImportError:
+        return None
+    except Exception:
+        return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -576,9 +557,10 @@ def _adme_section(
     with _col_hint:
         st.caption(
             "Calculated locally via **RDKit** (always available) + "
-            "**ADMET-AI ML** if installed (`pip install admet-ai`). "
+            "**ADMET-AI ML** (if installed: `pip install admet-ai`). "
             "Covers MW, LogP, TPSA, HBD/HBA, Lipinski/Veber rules, "
-            "GI/BBB/P-gp, CYP, hERG/AMES/DILI, PPB, VDd, half-life, LD50, PAINS/BRENK."
+            "GI/BBB/P-gp, CYP inhibition/substrate, hERG/AMES/DILI, "
+            "PPB, VDd, half-life, LD50, PAINS/BRENK."
         )
 
     if _clicked:
@@ -592,11 +574,10 @@ def _adme_section(
         st.error(f"ADME calculation error: {props['error']}")
         return
 
-    # ── ML source banner ──────────────────────────────────────────────────────
+    # ── ML source banner ─────────────────────────────────────────────────
     _ml_avail = props.get("ml_available", False)
     _ml_src   = props.get("ml_source", "")
     _ml_err   = props.get("ml_error")
-    _ml_res   = props.get("ml_results", {})
     if _ml_avail:
         st.markdown(
             f'<div style="display:inline-flex;align-items:center;gap:6px;'
@@ -750,18 +731,19 @@ def _adme_section(
     )
     st.caption("Structural SMARTS flags only — screening purpose, not quantitative.")
 
-    # ── ML Toxicity ───────────────────────────────────────────────────────────
+    # ── ML Toxicity section ───────────────────────────────────────────────
+    _ml_res = props.get("ml_results", {})
     if _ml_avail and _ml_res.get("herg") is not None:
         st.markdown("#### ☠️ Toxicity Predictions (ADMET-AI ML)")
         _tc = st.columns(4)
         for _col, (_lbl, _fkey, _pkey, _tip) in zip(_tc, [
-            ("hERG inhibition",   "herg",         "herg_prob",
+            ("hERG inhibition",  "herg",         "herg_prob",
              "Cardiac toxicity risk — QT prolongation"),
-            ("AMES mutagenicity", "ames",          "ames_prob",
+            ("AMES mutagenicity","ames",          "ames_prob",
              "Genotoxicity risk"),
-            ("DILI (liver)",      "dili",          "dili_prob",
+            ("DILI (liver)",     "dili",          "dili_prob",
              "Drug-induced liver injury"),
-            ("Skin reaction",     "skin_reaction", "skin_prob",
+            ("Skin reaction",    "skin_reaction", "skin_prob",
              "Skin sensitization"),
         ]):
             _flag = _ml_res.get(_fkey, False)
@@ -779,42 +761,44 @@ def _adme_section(
                 + '</div>',
                 unsafe_allow_html=True,
             )
+        # LD50 + Half-life + Clearance
+        st.markdown("")
         _tc2 = st.columns(3)
-        for _col2, (_lbl2, _key2, _unit2) in zip(_tc2, [
-            ("LD50 (oral)",          "ld50",      "mg/kg"),
-            ("Half-life",            "half_life", "hr"),
-            ("Hepatic clearance",    "clearance", "mL/min/g"),
+        for _col, (_lbl, _key, _unit) in zip(_tc2, [
+            ("LD50 (oral)", "ld50",      "mg/kg"),
+            ("Half-life",   "half_life", "hr"),
+            ("Hepatic clearance", "clearance", "mL/min/g"),
         ]):
-            _v2 = _ml_res.get(_key2)
-            if _v2 is not None:
-                _col2.metric(_lbl2, f"{_v2} {_unit2}")
+            _v = _ml_res.get(_key)
+            if _v is not None:
+                _col.metric(_lbl, f"{_v} {_unit}")
 
-    # ── CYP substrate (ML) ────────────────────────────────────────────────────
+    # ── CYP substrate (ML) ────────────────────────────────────────────────
     if _ml_avail and _ml_res.get("cyp2c9_sub") is not None:
         st.markdown("#### CYP Substrate Predictions (ADMET-AI ML)")
         _cyp_sub_cols = st.columns(3)
-        for _col3, (_cn3, _sk3, _pk3) in zip(_cyp_sub_cols, [
+        for _col, (_cn, _sk, _pk) in zip(_cyp_sub_cols, [
             ("CYP2C9", "cyp2c9_sub", "cyp2c9_sub_prob"),
             ("CYP2D6", "cyp2d6_sub", "cyp2d6_sub_prob"),
             ("CYP3A4", "cyp3a4_sub", "cyp3a4_sub_prob"),
         ]):
-            _v3 = _ml_res.get(_sk3, False)
-            _p3 = _ml_res.get(_pk3)
-            _bg3  = "#FFF8C5" if _v3 else "#DAFBE1"
-            _clr3 = "#9A6700" if _v3 else "#1A7F37"
-            _lbl3 = "⚠ Substrate" if _v3 else "✓ Non-substrate"
-            _col3.markdown(
-                f'<div style="background:{_bg3};border:1.5px solid {_clr3};'
+            _v = _ml_res.get(_sk, False)
+            _p = _ml_res.get(_pk)
+            _bg  = "#FFF8C5" if _v else "#DAFBE1"
+            _clr = "#9A6700" if _v else "#1A7F37"
+            _lbl = "⚠ Substrate" if _v else "✓ Non-substrate"
+            _col.markdown(
+                f'<div style="background:{_bg};border:1.5px solid {_clr};'
                 f'border-radius:8px;padding:8px;text-align:center;">'
-                f'<div style="font-size:11px;font-weight:600;color:{_clr3};">{_cn3}</div>'
-                f'<div style="font-size:13px;font-weight:700;color:{_clr3};">{_lbl3}</div>'
-                + (f'<div style="font-size:10px;color:#888;">p = {_p3:.3f}</div>'
-                   if _p3 is not None else "")
+                f'<div style="font-size:11px;font-weight:600;color:{_clr};">{_cn}</div>'
+                f'<div style="font-size:13px;font-weight:700;color:{_clr};">{_lbl}</div>'
+                + (f'<div style="font-size:10px;color:#888;">p = {_p:.3f}</div>'
+                   if _p is not None else "")
                 + '</div>',
                 unsafe_allow_html=True,
             )
 
-    # ── PPB + VDd (ML) ────────────────────────────────────────────────────────
+    # ── PPB + VDd (ML) ────────────────────────────────────────────────────
     if _ml_avail and _ml_res.get("ppb") is not None:
         _pp1, _pp2 = st.columns(2)
         with _pp1:
@@ -2558,7 +2542,7 @@ def _ready_figure_section(
             key=f"rtf_src_{mode}",
             help=(
                 "Source for the 2D ligand-receptor interaction diagram.\n\n"
-                "📖 Anyone Can Dock : custom SVG, fast, offline.\n"
+                "📖 Anyone Can Dock : custom SVG, fast, offline, with interaction types.\n"
                 "   RDKit           : RDKit highlight-style, fast, offline.\n"
                 "   PoseView        : proteins.plus REST API, publication quality.\n"
                 "⚙️ Use ACD/RDKit for offline work or rapid iteration.\n"
@@ -3003,6 +2987,7 @@ def _poseview_ui(
                     help=(
                         "Interaction distance cutoff for the 2D diagram (Å).\n\n"
                         "📖 Residues within this distance → drawn as labeled circles.\n"
+                        "   Circle color = interaction type (see legend below diagram).\n"
                         "⚙️ 4.0–4.5 Å = captures most meaningful interactions.\n"
                         "⚠️ < 3.0 Å may miss hydrophobic contacts.\n"
                         "   > 5.0 Å clutters the diagram with weak contacts."
@@ -3014,6 +2999,7 @@ def _poseview_ui(
                     help=(
                         "Max residues shown in the 2D interaction diagram.\n\n"
                         "📖 Top N by priority (metal > ionic > H-bond > hydrophobic).\n"
+                        "   Remaining residues are omitted for readability.\n"
                         "⚙️ 10–14 : standard (default).\n"
                         "    6–8  : simple ligands with few contacts.\n"
                         "   18–20 : complex multi-residue interactions.\n"
@@ -3607,8 +3593,7 @@ def _receptor_section(pfx: str, wdir: Path, step_label: str):
                 "📖 Download = fetch from RCSB using a 4-letter PDB ID.\n"
                 "   Upload  = use your own .pdb or .cif file.\n"
                 "⚙️ Use Upload for homology models or pre-prepared structures.\n"
-                "⚠️ CIF recommended for large entries (>100 kDa) — "
-                "PDB truncates at 99,999 atoms."
+                "⚠️ CIF recommended for large entries (>100 kDa) — PDB truncates at 99,999 atoms."
             ),
         )
         if src == "Download from RCSB":
@@ -3636,7 +3621,7 @@ def _receptor_section(pfx: str, wdir: Path, step_label: str):
                             "📖 Missing residues = structural gaps.\n"
                             "   Gaps near the binding site reduce docking reliability.\n"
                             "⚙️ Keep ON for most targets (default).\n"
-                            "⚠️ Even 'complete' structures may have flexible loops."
+                            "⚠️ Even 'complete' structures may have flexible loops — always inspect."
                         ),
                     )
                 with _pref_col2:
@@ -3648,7 +3633,7 @@ def _receptor_section(pfx: str, wdir: Path, step_label: str):
 
                 if _search_clicked and _rcsb_query.strip():
                     with st.spinner(f"Searching RCSB for '{_rcsb_query}'…"):
-                        _hits = _search_protein_rcsb(_rcsb_query.strip(), top_n=30)
+                        _hits = _search_protein_rcsb(_rcsb_query.strip(), top_n=12)
                         if _prefer_complete:
                             _hits = sorted(
                                 _hits,
@@ -3762,7 +3747,7 @@ def _receptor_section(pfx: str, wdir: Path, step_label: str):
             help=(
                 "How to set the center of the docking search box.\n\n"
                 "📖 The box MUST cover the binding site — wrong center = wrong region.\n"
-                "⚙️ Auto-detect: best when a co-crystal ligand is in the PDB.\n"
+                "⚙️ Auto-detect: best when a co-crystal ligand is present in the PDB.\n"
                 "   Manual XYZ : enter coordinates from a known binding site.\n"
                 "   ProDy sel  : select by residue/chain string.\n"
                 "⚠️ If no ligand is found, grid defaults to protein centroid."
@@ -3826,7 +3811,7 @@ def _receptor_section(pfx: str, wdir: Path, step_label: str):
                 value="resid 702 820 and chain A",
                 key=pfx + "mda_sel",
                 help=(
-                    "ProDy atom selection — centroid of selected atoms becomes the box center.\n\n"
+                    "ProDy atom selection — the centroid of selected atoms becomes the box center.\n\n"
                     "📖 Examples:\n"
                     "   resid 702 and chain A\n"
                     "   resname ATP and chain B\n"
@@ -4403,6 +4388,7 @@ with tab_basic:
             help=(
                 "SMILES string for the ligand (e.g. CCO = ethanol).\n\n"
                 "📖 Text representation of molecular structure.\n"
+                "   Each letter = atom, numbers = ring closures.\n"
                 "⚙️ Copy from PubChem, ChEMBL, or DrugBank.\n"
                 "   Use the search box above to auto-fill from compound name.\n"
                 "⚠️ Include correct stereochemistry (@/@@) if chiral centers exist.\n"
@@ -4423,6 +4409,7 @@ with tab_basic:
                 "📖 Use uploaded form : keep all atoms exactly as in the file.\n"
                 "   Protonate at pH   : re-run Dimorphite-DL on extracted SMILES.\n"
                 "⚙️ 'As uploaded' if file is already correctly prepared.\n"
+                "   'At pH' if file is only a 3D template for coordinates.\n"
                 "⚠️ 'As uploaded' skips all protonation checks.\n"
                 "   Incorrect H atoms = poor docking quality."
             ),
@@ -4459,15 +4446,63 @@ with tab_basic:
             "   Amines (pKa ~10) are +1 at pH 7.4.\n"
             "   Carboxylic acids (pKa ~4.5) are -1 at pH 7.4.\n"
             "⚙️ 7.4 = plasma/cytosol (default).\n"
-            "   6.5 = tumor microenvironment.   5.0 = lysosome.\n"
-            "⚠️ Wrong pH can shift net charge ±1 — large effect on affinity."
+            "   6.5 = tumor microenvironment.\n"
+            "   5.0 = lysosome / endosome.\n"
+            "⚠️ Wrong pH can shift net charge ±1 — large effect on docking affinity."
         ),
     )
     st.caption("Default ligand preparation uses Dimorphite-DL at the target pH, then reports the RDKit formal charge of the final SMILES.")
 
     # ── Protonation mode ──────────────────────────────────────────────────────
-    _prot_mode_key = "dimorphite"
-    _use_pubchem = False
+    _prot_mode_ui = st.radio(
+        "Protonation mode",
+        [
+            "⚡ Fast (Dimorphite-DL)",
+            "🔬 Neutral (add H only)",
+            "🧬 pKaNET Cloud",
+        ],
+        horizontal=True,
+        key="prot_mode",
+        help=(
+            "How to determine the ligand's protonation state at the target pH.\n\n"
+            "📖 ⚡ Fast       : Dimorphite-DL — fast, works offline, good for most drugs.\n"
+            "   🔬 Neutral    : keep input charge, just add H — use with pre-prepared files.\n"
+            "   🧬 pKaNET     : tautomer-aware microstate ranking, PubChem pKa evidence.\n"
+            "                   Best for polyphenols, flavonoids, zwitterions.\n"
+            "⚙️ Use pKaNET for natural products and complex ring systems.\n"
+            "⚠️ pKaNET may take 5–30 s per ligand (built-in algorithm, no extra file needed)."
+        ),
+    )
+    _prot_mode_key = {
+        "⚡ Fast (Dimorphite-DL)": "dimorphite",
+        "🔬 Neutral (add H only)": "neutral",
+        "🧬 pKaNET Cloud":         "pkanet",
+    }.get(_prot_mode_ui, "dimorphite")
+
+    # pKaNET advanced options (shown only when pKaNET is selected)
+    _use_pubchem    = False
+    _pkanet_max_tau = 8
+    _pkanet_ph_win  = 1.0
+    if _prot_mode_ui == "🧬 pKaNET Cloud":
+        with st.expander("⚙️ pKaNET options", expanded=False):
+            _use_pubchem    = st.checkbox(
+                "Query PubChem for experimental pKa",
+                value=True, key="pkanet_use_pubchem",
+                help="Fetch dissociation constants from PubChem to guide microstate scoring.",
+            )
+            _pkanet_max_tau = st.slider(
+                "Max tautomers", 1, 20, 8, key="pkanet_max_tau",
+                help="Max tautomers enumerated per SMILES. Higher = more thorough, slower.",
+            )
+            _pkanet_ph_win  = st.slider(
+                "pH window", 0.2, 2.0, 1.0, 0.1, key="pkanet_ph_win",
+                help="Dimorphite-DL enumerates states in [pH − window/2, pH + window/2].",
+            )
+        st.info(
+            "🧬 pKaNET Cloud mode — tautomer enumeration + 8-component HH scoring. "
+            "Built-in algorithm, no extra files required. May take 5–30 s per ligand.",
+            icon="ℹ️",
+        )
     # ─────────────────────────────────────────────────────────────────────────
 
     if not st.session_state.receptor_done:
@@ -4488,8 +4523,13 @@ with tab_basic:
         })
         with st.spinner("Preparing ligand…"):
             _mode = st.session_state.get("lig_input_mode", "SMILES string")
-            _prot_mode_key  = "dimorphite"
-            _use_pubchem    = False
+            # ✅ อ่านค่าจาก radio button ที่ผู้ใช้เลือก — ห้าม hardcode
+            _prot_mode_key = {
+                "⚡ Fast (Dimorphite-DL)": "dimorphite",
+                "🔬 Neutral (add H only)": "neutral",
+                "🧬 pKaNET Cloud":         "pkanet",
+            }.get(st.session_state.get("prot_mode", "⚡ Fast (Dimorphite-DL)"), "dimorphite")
+            _use_pubchem    = st.session_state.get("pkanet_use_pubchem", False)
             _pkanet_max_tau = st.session_state.get("pkanet_max_tau", 8)
             _pkanet_ph_win  = st.session_state.get("pkanet_ph_win", 1.0)
 
@@ -4612,6 +4652,7 @@ with tab_basic:
             help=(
                 "Search thoroughness — higher = more reliable, slower.\n\n"
                 "📖 Controls number of Monte Carlo steps Vina performs.\n"
+                "   Higher values reduce chance of missing the global minimum.\n"
                 "⚙️ 8  = quick test / screening.\n"
                 "   16 = standard work (default).\n"
                 "   32 = publication quality.\n"
@@ -4624,6 +4665,7 @@ with tab_basic:
             help=(
                 "Maximum number of binding poses to output.\n\n"
                 "📖 Poses ranked best (1) to worst by binding affinity.\n"
+                "   Pose 1 = predicted best binding mode.\n"
                 "⚙️ 9–10 : standard (default).\n"
                 "   15–20 : when diverse alternative poses are needed.\n"
                 "⚠️ More poses does not improve the best result.\n"
@@ -4637,6 +4679,8 @@ with tab_basic:
                 "📖 Poses worse than (best + range) are discarded.\n"
                 "   Example: best = -9.0, range = 3 → discard above -6.0.\n"
                 "⚙️ 3 kcal/mol = standard (default).\n"
+                "   1–2 = only tightly clustered top poses.\n"
+                "   4–5 = explore diverse binding modes.\n"
                 "⚠️ Large range + many poses can produce low-quality output."
             ),
         )
@@ -4661,7 +4705,7 @@ with tab_basic:
                 "📖 If RMSD ≤ 2 Å vs crystal pose, the protocol is validated.\n"
                 "   Score = reference baseline for comparing your ligand.\n"
                 "⚙️ Enable when a co-crystal ligand exists in the PDB entry.\n"
-                "⚠️ RMSD > 2 Å = protocol issues — check box placement and SMILES."
+                "⚠️ RMSD > 2 Å = protocol issues — check box placement and ligand SMILES."
             ),
         )
         if do_redock:
@@ -4774,7 +4818,11 @@ with tab_basic:
             else:
                 df = None
 
-            mols = load_mols_from_sdf(dock["out_sdf"], sanitize=False) if os.path.exists(dock["out_sdf"]) else []
+            mols = load_mols_from_sdf(
+                pv_sdf if (pv_sdf and os.path.exists(pv_sdf) and os.path.getsize(pv_sdf) > 10)
+                else dock["out_sdf"],
+                sanitize=False,
+            ) if os.path.exists(dock["out_sdf"]) else []
             _full_log = dock["log"] + "\n\n── Bond-order fix ──\n" + "\n".join(pv_log)
             st.session_state.update({
                 "output_pdbqt": dock["out_pdbqt"], "output_sdf": dock["out_sdf"],
@@ -4865,7 +4913,8 @@ with tab_basic:
         _redock_result = st.session_state.get("redock_result")
         if _redock_result and _redock_result.get("out_sdf") and os.path.exists(_redock_result["out_sdf"]):
             st.markdown("**⭐ Redocking Reference**")
-            _rd_mols = load_mols_from_sdf(_redock_result["out_sdf"], sanitize=False)
+            _rd_src = _redock_result.get("pv_sdf") or _redock_result["out_sdf"]
+            _rd_mols = load_mols_from_sdf(_rd_src, sanitize=False)
             if _rd_mols:
                 _rd_pose_i = st.slider("Reference pose", 1, len(_rd_mols), 1, key="rd_pose_sel") - 1
                 _rd_scores = _redock_result.get("pose_scores", [])
@@ -4961,8 +5010,11 @@ with tab_basic:
                 "   3000 ms = slow, careful inspection per pose."
             ),
         )
+        _anim_sdf = st.session_state.get("output_pv_sdf") or st.session_state.output_sdf
+        if not (_anim_sdf and os.path.exists(_anim_sdf) and os.path.getsize(_anim_sdf) > 10):
+            _anim_sdf = st.session_state.output_sdf
         if st.session_state.output_sdf and os.path.exists(st.session_state.output_sdf):
-            sdf_txt = open(st.session_state.output_sdf).read()
+            sdf_txt = open(_anim_sdf).read()
             va = py3Dmol.view(width="100%", height=440)
             va.setBackgroundColor(_viewer_bg())
             mai = 0
@@ -4997,8 +5049,7 @@ with tab_basic:
                     "   Higher poses = progressively less favorable.\n"
                     "⚙️ Start with pose 1. Check pose 2–3 for alternative modes.\n"
                     "⚠️ Pose rank ≠ biological relevance.\n"
-                    "   A slightly worse pose with better pharmacophore match "
-                    "may be more meaningful."
+                    "   A slightly worse pose with better pharmacophore match may be more meaningful."
                 ),
             ) - 1
             sel_mol  = mols[pose_idx]
@@ -5087,7 +5138,8 @@ with tab_basic:
                         "Show residue name + number + chain as 3D labels.\n\n"
                         "📖 Yellow labels on each interacting residue in the viewer.\n"
                         "⚙️ Enable for analysis, disable for clean screenshots.\n"
-                        "⚠️ Dense pockets → overlapping labels."
+                        "⚠️ Dense pockets → overlapping labels.\n"
+                        "   Reduce distance cutoff to show fewer residues."
                     ),
                 )
                 _show_surface = st.checkbox(
@@ -5095,6 +5147,7 @@ with tab_basic:
                     help=(
                         "Render a solvent-excluded surface (SES) around the protein.\n\n"
                         "📖 Shows the 3D shape of the binding pocket.\n"
+                        "   Good fit = ligand sits snugly inside the cavity.\n"
                         "⚙️ Enable to assess shape complementarity.\n"
                         "⚠️ Increases GPU load — may be slow on mobile or large proteins."
                     ),
@@ -5528,7 +5581,8 @@ with tab_batch:
             is_redock_sel = sel_res.get("is_redock", False)
             pose_scores_l = sel_res.get("pose_scores", [])
 
-            b_mols = load_mols_from_sdf(sel_res["out_sdf"], sanitize=False)
+            _b_src = sel_res.get("pv_sdf") or sel_res["out_sdf"]
+            b_mols = load_mols_from_sdf(_b_src, sanitize=False) if (_b_src and os.path.exists(_b_src)) else []
             if b_mols:
                 b_pose_i = st.slider("Pose", 1, len(b_mols), 1, key="b_pose_sel") - 1
                 this_score = pose_scores_l[b_pose_i] if b_pose_i < len(pose_scores_l) else sel_res["Top Score"]
@@ -5705,7 +5759,8 @@ with tab_batch:
                 [r["Name"] for r in pv_browsable], index=0, key="b_pv_lig_sel")
             pv_sel_res  = next(r for r in pv_browsable if r["Name"] == pv_sel_nm)
             pv_safe_nm  = pv_sel_nm.replace("⭐ ", "").replace(" (co-crystal ref)", "")
-            pv_all_mols = load_mols_from_sdf(pv_sel_res["out_sdf"], sanitize=False)
+            _pv_all_src = pv_sel_res.get("pv_sdf") or pv_sel_res["out_sdf"]
+            pv_all_mols = load_mols_from_sdf(_pv_all_src, sanitize=False) if (_pv_all_src and os.path.exists(_pv_all_src)) else []
 
             if pv_all_mols:
                 pv_pose_i = st.slider("Pose (AI prompt context)", 1, len(pv_all_mols), 1, key="b_pv_pose_sel") - 1
