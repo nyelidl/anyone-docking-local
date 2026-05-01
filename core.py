@@ -1,18 +1,25 @@
 #!/usr/bin/env python3
 """
-standalone_core.py — Computation layer for Anyone Can Dock (Standalone Edition).
+core.py — Computation layer for Anyone Can Dock (Local Edition).
 No Streamlit imports. All functions return plain dicts / tuples.
-Safe to import in: Streamlit, Colab notebooks, pytest, CLI scripts.
+Safe to import in Streamlit, Colab notebooks, pytest, CLI scripts.
 
-Platforms : macOS Intel · macOS Apple Silicon · Windows · Linux · Google Colab
-Python    : 3.9+
+Platforms : macOS Intel · macOS Apple Silicon · Windows · Linux
+Python    : 3.11
 
-Setup (first time):
-    python standalone_core.py setup          # auto-install Python packages
-    python standalone_core.py info           # show dependency status
+Setup:
+    brew install python@3.11 open-babel cairo pango
+    git clone https://github.com/nyelidl/anyone-docking-local.git
+    cd anyone-docking-local
+    python3.11 -m venv venv && source venv/bin/activate
+    pip install -r requirements.txt
 
-Run the app:
-    streamlit run standalone_app.py
+Run:
+    streamlit run app.py
+
+CLI utilities:
+    python core.py info        # show dependency status
+    python core.py setup       # install missing Python packages
 """
 
 import os
@@ -137,7 +144,7 @@ def setup_standalone(colab: bool = False) -> None:
 
     print("\n══ Dependency Status ══")
     check_dependencies(verbose=True)
-    print("\n  Run:  streamlit run standalone_app.py\n")
+    print("\n  Run:  streamlit run app.py\n")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3792,7 +3799,7 @@ def draw_interaction_diagram_interactive(
 if __name__ == "__main__":
     import argparse as _ap
     _parser = _ap.ArgumentParser(
-        prog="standalone_core",
+        prog="core",
         description="Anyone Can Dock — Standalone Core utilities",
     )
     _parser.add_argument(
@@ -3813,7 +3820,7 @@ if __name__ == "__main__":
         st = check_dependencies(verbose=True)
         missing_py = [n for n, ok in st.items() if not ok and n != "obabel"]
         if missing_py or not st.get("obabel"):
-            print(f"\n  Run `python standalone_core.py setup` to install missing packages.")
+            print(f"\n  Run `python core.py setup` to install missing packages.")
         else:
             print(f"\n  ✓  All dependencies OK.")
-            print(f"  Run: streamlit run standalone_app.py")
+            print(f"  Run: streamlit run app.py")
