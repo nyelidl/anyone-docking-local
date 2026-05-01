@@ -1589,7 +1589,31 @@ def prepare_ligand(
                 raise ValueError(f"RDKit could not parse SMILES: {raw[:60]}")
             prot = Chem.MolToSmiles(mol_check, isomericSmiles=True, canonical=True)
             log.append("✓ Neutral mode (keep input charge state)")
+
+        elif actual_mode == "pkanet":
+            # ── pKaNET Cloud pipeline ─────────────────────────────────────
+            try:
+                prot, _, pka_log = protonate_pkanet(
+                    raw, ph,
+                    use_pubchem=use_pubchem,
+                    max_tautomers=max_tautomers,
+                    ph_window=ph_window,
+                )
+                log.extend(pka_log)
+                log.append("✓ pKaNET Cloud protonation applied")
+            except Exception as _pke:
+                log.append(f"⚠ pKaNET failed ({_pke}) — falling back to Dimorphite-DL")
+                try:
+                    from dimorphite_dl import protonate_smiles
+                    vs = protonate_smiles(raw, ph_min=ph, ph_max=ph, max_variants=1)
+                    if vs:
+                        prot = vs[0] if isinstance(vs, list) else vs
+                        log.append(f"✓ Dimorphite-DL fallback pH {ph:.1f}")
+                except Exception as e2:
+                    log.append(f"⚠ Dimorphite-DL fallback skipped: {e2}")
+
         else:
+            # dimorphite (default)
             try:
                 from dimorphite_dl import protonate_smiles
                 vs = protonate_smiles(prot, ph_min=ph, ph_max=ph, max_variants=1)
@@ -1600,9 +1624,6 @@ def prepare_ligand(
                     log.append("⚠ Dimorphite-DL returned no variants — using input SMILES")
             except Exception as e:
                 log.append(f"⚠ Dimorphite-DL skipped: {e}")
-            if actual_mode == "pkanet":
-                log.append("ℹ pKaNET mode is mapped to the simplified ligand-preparation workflow in this version")
-                actual_mode = "dimorphite"
 
         mol = Chem.MolFromSmiles(prot)
         if mol is None:
@@ -1891,8 +1912,22 @@ def _bo_template(smiles: str):
     from rdkit import Chem
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
-        raise ValueError(f"Cannot parse SMILES: {smiles!r}")
-    Chem.Kekulize(mol, clearAromaticFlags=True)
+        # Fallback for charged/tautomeric SMILES (e.g. flavonoids with [O-])
+        mol = Chem.MolFromSmiles(smiles, sanitize=False)
+        if mol is None:
+            raise ValueError(f"Cannot parse SMILES: {smiles!r}")
+        try:
+            mol.UpdatePropertyCache(strict=False)
+            Chem.FastFindRings(mol)
+            Chem.SetAromaticity(mol)
+        except Exception:
+            pass
+    try:
+        Chem.Kekulize(mol, clearAromaticFlags=True)
+    except Exception:
+        # Kekulize fails for charged/tautomeric aromatics (e.g. flavonoids [O-])
+        # AssignBondOrdersFromTemplate still works without it
+        pass
     return mol
 
 
@@ -3291,9 +3326,25 @@ def _build_diagram_data(receptor_pdb, pose_sdf, smiles, cutoff, max_residues, si
             break
     if mol3d is None or mol3d.GetNumConformers() == 0:
         raise ValueError("No valid 3D pose in SDF")
+    # ── Robust mol2d from SMILES (handles charged/tautomeric aromatics) ──────
+    def _parse_smi_robust(smi):
+        if not smi: return None
+        m = Chem.MolFromSmiles(smi)
+        if m: return m
+        try:
+            m = Chem.MolFromSmiles(smi, sanitize=False)
+            if m is None: return None
+            m.UpdatePropertyCache(strict=False)
+            Chem.FastFindRings(m)
+            Chem.SetAromaticity(m)
+            m2 = Chem.MolFromSmiles(Chem.MolToSmiles(m))
+            return m2 if m2 else m
+        except Exception:
+            return None
+
     mol2d = None
     if smiles and smiles.strip():
-        mol2d = Chem.MolFromSmiles(smiles.strip())
+        mol2d = _parse_smi_robust(smiles.strip())
     if mol2d is None:
         mol2d = Chem.RemoveHs(mol3d, sanitize=False)
         try: Chem.SanitizeMol(mol2d)
@@ -3303,12 +3354,29 @@ def _build_diagram_data(receptor_pdb, pose_sdf, smiles, cutoff, max_residues, si
     m3 = Chem.RemoveHs(mol3d, sanitize=False)
     try: Chem.SanitizeMol(m3)
     except: pass
+
+    # ── Charge-agnostic substructure matching ─────────────────────────────
+    # GetSubstructMatch fails when mol2d has [O-] but m3 from raw Vina SDF
+    # has no formal charges. Strip charges on both sides for matching only.
     m3to2d = {}
     try:
-        mt = m3.GetSubstructMatch(mol2d)
+        def _strip_charges(mol):
+            rw = Chem.RWMol(mol)
+            for a in rw.GetAtoms(): a.SetFormalCharge(0)
+            Chem.SanitizeMol(rw)
+            return rw.GetMol()
+        m3_neutral    = _strip_charges(m3)
+        mol2d_neutral = _strip_charges(mol2d)
+        mt = m3_neutral.GetSubstructMatch(mol2d_neutral)
         if len(mt) == mol2d.GetNumAtoms():
             for i2, i3 in enumerate(mt): m3to2d[i3] = i2
-    except: pass
+    except Exception:
+        try:
+            mt = m3.GetSubstructMatch(mol2d)
+            if len(mt) == mol2d.GetNumAtoms():
+                for i2, i3 in enumerate(mt): m3to2d[i3] = i2
+        except Exception:
+            pass
     try: raw = _detect_all_interactions(mol3d, receptor_pdb, cutoff=cutoff)
     except: raw = []
     try: _enrich_with_res_xyz(raw, mol3d, receptor_pdb)
@@ -3437,11 +3505,25 @@ def draw_interactions_rdkit_classic(
     except: pass
     idx3d_to_2d = {}
     try:
-        match = mol3d_noH.GetSubstructMatch(mol2d)
+        def _strip_charges_rdk(mol):
+            rw = Chem.RWMol(mol)
+            for a in rw.GetAtoms(): a.SetFormalCharge(0)
+            Chem.SanitizeMol(rw)
+            return rw.GetMol()
+        m3n   = _strip_charges_rdk(mol3d_noH)
+        m2d_n = _strip_charges_rdk(mol2d)
+        match = m3n.GetSubstructMatch(m2d_n)
         if len(match) == mol2d.GetNumAtoms():
             for i2d, i3d in enumerate(match):
                 idx3d_to_2d[i3d] = i2d
-    except: pass
+    except Exception:
+        try:
+            match = mol3d_noH.GetSubstructMatch(mol2d)
+            if len(match) == mol2d.GetNumAtoms():
+                for i2d, i3d in enumerate(match):
+                    idx3d_to_2d[i3d] = i2d
+        except Exception:
+            pass
     try:
         raw = _detect_all_interactions(lig_mol, receptor_pdb, cutoff=cutoff)
     except:
