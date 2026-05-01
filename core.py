@@ -1,9 +1,18 @@
 #!/usr/bin/env python3
 """
-core.py — Pure computation layer for Anyone Can Dock.
+standalone_core.py — Computation layer for Anyone Can Dock (Standalone Edition).
 No Streamlit imports. All functions return plain dicts / tuples.
-Safe to import in Colab notebooks, pytest, or any UI framework.
+Safe to import in: Streamlit, Colab notebooks, pytest, CLI scripts.
 
+Platforms : macOS Intel · macOS Apple Silicon · Windows · Linux · Google Colab
+Python    : 3.9+
+
+Setup (first time):
+    python standalone_core.py setup          # auto-install Python packages
+    python standalone_core.py info           # show dependency status
+
+Run the app:
+    streamlit run standalone_app.py
 """
 
 import os
@@ -12,11 +21,129 @@ import sys
 import tempfile
 import time
 import re as _re
+import platform as _platform
+import shutil as _shutil
 from pathlib import Path
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  PLATFORM DETECTION
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _detect_platform() -> dict:
+    """Return runtime environment info."""
+    is_colab = False
+    try:
+        import google.colab  # noqa
+        is_colab = True
+    except ImportError:
+        pass
+    return {
+        "os":      _platform.system().lower(),   # linux | darwin | windows
+        "arch":    _platform.machine().lower(),   # x86_64 | arm64 | aarch64
+        "python":  _platform.python_version(),
+        "is_colab": is_colab,
+    }
+
+PLATFORM = _detect_platform()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  DEPENDENCY MANAGEMENT
+# ══════════════════════════════════════════════════════════════════════════════
+
+_PY_PACKAGES = [
+    ("rdkit",         "rdkit",         "from rdkit import Chem"),
+    ("numpy",         "numpy",         "import numpy"),
+    ("prody",         "prody",         "import prody"),
+    ("dimorphite_dl", "dimorphite_dl", "from dimorphite_dl import protonate_smiles"),
+    ("meeko",         "meeko",         "from meeko import MoleculePreparation"),
+    ("requests",      "requests",      "import requests"),
+    ("cairosvg",      "cairosvg",      "import cairosvg"),
+    ("Pillow",        "pillow",        "from PIL import Image"),
+]
+
+_OBABEL_INSTALL = {
+    "darwin":  "brew install open-babel",
+    "linux":   "sudo apt-get install openbabel  OR  conda install -c conda-forge openbabel",
+    "windows": "https://github.com/openbabel/openbabel/releases  (installer)",
+}
+
+
+def check_dependencies(verbose: bool = True) -> dict:
+    """
+    Check which dependencies are installed.
+    Returns {name: bool}.
+    """
+    status = {}
+    for name, pip_name, import_stmt in _PY_PACKAGES:
+        try:
+            exec(import_stmt)
+            status[name] = True
+            if verbose:
+                print(f"  ✓  {name}")
+        except (ImportError, ModuleNotFoundError):
+            status[name] = False
+            if verbose:
+                print(f"  ✗  {name}  (pip install {pip_name})")
+
+    status["obabel"] = _shutil.which("obabel") is not None
+    if verbose:
+        if status["obabel"]:
+            print("  ✓  openbabel")
+        else:
+            install_hint = _OBABEL_INSTALL.get(PLATFORM["os"], "install openbabel")
+            print(f"  ✗  openbabel  ({install_hint})")
+    return status
+
+
+def setup_standalone(colab: bool = False) -> None:
+    """
+    Install missing Python packages via pip.
+    Call once before running the app for the first time.
+    """
+    print("\n══ Anyone Can Dock — Standalone Setup ══")
+    print(f"  Python {PLATFORM['python']} · {PLATFORM['os']} · {PLATFORM['arch']}")
+
+    missing = []
+    for name, pip_name, import_stmt in _PY_PACKAGES:
+        try:
+            exec(import_stmt)
+        except (ImportError, ModuleNotFoundError):
+            missing.append(pip_name)
+
+    if not missing:
+        print("  ✓  All Python packages already installed.")
+    else:
+        print(f"  Installing: {', '.join(missing)} …")
+        cmd = [sys.executable, "-m", "pip", "install"] + missing
+        if colab:
+            cmd.append("-q")
+        rc = subprocess.run(cmd, capture_output=False).returncode
+        if rc != 0:
+            print("  ⚠  pip install returned errors — check output above.")
+
+    # obabel
+    if not _shutil.which("obabel"):
+        hint = _OBABEL_INSTALL.get(PLATFORM["os"], "install openbabel")
+        print(f"\n  ⚠  OpenBabel not found.")
+        print(f"     Install: {hint}")
+        if PLATFORM["is_colab"]:
+            subprocess.run(["apt-get", "install", "-y", "-q", "openbabel"],
+                           capture_output=True)
+            if _shutil.which("obabel"):
+                print("  ✓  OpenBabel installed via apt-get.")
+    else:
+        print("  ✓  openbabel found.")
+
+    print("\n══ Dependency Status ══")
+    check_dependencies(verbose=True)
+    print("\n  Run:  streamlit run standalone_app.py\n")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  CONSTANTS
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 METAL_RESNAMES = {
     "MG", "ZN", "CA", "MN", "FE", "CU", "CO", "NI", "CD", "HG", "NA", "K", "HO",
@@ -183,9 +310,9 @@ def is_cif_file(filepath: str) -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def check_obabel():
-    import shutil
-    if shutil.which("obabel") is None:
-        return False, "obabel not found — add 'openbabel' to packages.txt"
+    if _shutil.which("obabel") is None:
+        hint = _OBABEL_INSTALL.get(PLATFORM["os"], "install openbabel")
+        return False, f"obabel not found — {hint}"
     _, out = run_cmd("obabel --version")
     return True, (out.splitlines()[0] if out else "ok")
 
@@ -195,27 +322,39 @@ def check_obabel():
 # ══════════════════════════════════════════════════════════════════════════════
 
 def get_vina_binary(path: str = ""):
-    import platform
-    system  = platform.system().lower()
-    machine = platform.machine().lower()
+    """
+    Download AutoDock Vina 1.2.7 for the current platform.
+    Supports: macOS Intel, macOS Apple Silicon, Windows x64, Linux x86_64, Linux aarch64.
+    Returns (vina_path, message).
+    """
+    os_name = PLATFORM["os"]
+    arch    = PLATFORM["arch"]
+
     _BASE = "https://github.com/ccsb-scripps/AutoDock-Vina/releases/download/v1.2.7/"
-    if system == "linux":
-        _FNAME = "vina_1.2.7_linux_x86_64"
-    elif system == "darwin":
-        _FNAME = ("vina_1.2.7_mac_aarch64"
-                  if machine in ("arm64", "aarch64")
-                  else "vina_1.2.7_mac_x86_64")
-    elif system == "windows":
-        _FNAME = "vina_1.2.7_windows_x86_64.exe"
-    else:
-        return None, f"Unsupported platform: {system}/{machine}"
+    _FMAP = {
+        ("linux",   "x86_64"):  "vina_1.2.7_linux_x86_64",
+        ("linux",   "aarch64"): "vina_1.2.7_linux_aarch64",
+        ("linux",   "arm64"):   "vina_1.2.7_linux_aarch64",
+        ("darwin",  "arm64"):   "vina_1.2.7_mac_aarch64",
+        ("darwin",  "aarch64"): "vina_1.2.7_mac_aarch64",
+        ("darwin",  "x86_64"):  "vina_1.2.7_mac_x86_64",
+        ("windows", "amd64"):   "vina_1.2.7_windows_x86_64.exe",
+        ("windows", "x86_64"):  "vina_1.2.7_windows_x86_64.exe",
+    }
+    _FNAME = _FMAP.get((os_name, arch))
+    if _FNAME is None:
+        # generic fallback
+        _FNAME = f"vina_1.2.7_{os_name}_x86_64"
+        if os_name == "windows":
+            _FNAME += ".exe"
+
     _URL = _BASE + _FNAME
     if not path:
         path = os.path.join(tempfile.gettempdir(), _FNAME)
 
     def _download(url, dest):
         import requests as _rq
-        r = _rq.get(url, stream=True, timeout=120, allow_redirects=True)
+        r = _rq.get(url, stream=True, timeout=180, allow_redirects=True)
         r.raise_for_status()
         with open(dest, "wb") as f:
             for chunk in r.iter_content(chunk_size=1 << 20):
@@ -225,7 +364,8 @@ def get_vina_binary(path: str = ""):
         try:
             _download(_URL, path)
         except Exception as e1:
-            if system == "darwin" and machine in ("arm64", "aarch64"):
+            # Apple Silicon → try x86_64 via Rosetta
+            if os_name == "darwin" and arch in ("arm64", "aarch64"):
                 _FNAME2 = "vina_1.2.7_mac_x86_64"
                 path2   = os.path.join(tempfile.gettempdir(), _FNAME2)
                 try:
@@ -236,9 +376,9 @@ def get_vina_binary(path: str = ""):
             else:
                 return None, f"Download failed: {e1}"
 
-    if system != "windows":
+    if os_name != "windows":
         os.chmod(path, 0o755)
-    return path, f"ok ({system}/{machine})"
+    return path, f"ok ({os_name}/{arch})"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1370,45 +1510,50 @@ def _generate_ranked_microstates(
 def _apply_ionizable_site_correction(original_smiles: str, current_smiles: str,
                                       ph: float, log: list) -> str:
     """
-    FIX 12: Post-Dimorphite correction using the FIXED _find_ionizable_sites.
-    Deprotonates any acid site with pKa < pH still protonated in current_smiles.
-    Now works for flavonoids because _find_ionizable_sites uses claimed_atoms
-    (FIX 5) and correct A-ring pKas (Fixes 1-4).
+    Post-Dimorphite correction using the FIXED _find_ionizable_sites.
+    Deprotonates ALL acid sites with pKa < (ph - 0.5) still protonated.
+    Handles flavonoids, catechols, polyphenols that Dimorphite misses.
     """
     from rdkit import Chem
-    mol = Chem.MolFromSmiles(current_smiles)
-    if mol is None:
-        return current_smiles
+    result = current_smiles
+    n_corrected = 0
 
-    fc_map = {a.GetIdx(): int(a.GetFormalCharge()) for a in mol.GetAtoms()}
-    sites  = _find_ionizable_sites(mol)
+    for _pass in range(6):  # max 6 sites per molecule
+        mol = Chem.MolFromSmiles(result)
+        if mol is None:
+            break
+        fc_map = {a.GetIdx(): int(a.GetFormalCharge()) for a in mol.GetAtoms()}
+        sites  = _find_ionizable_sites(mol)
 
-    missed = sorted(
-        [s for s in sites
-         if s["site_type"] == "acid"
-         and s["heuristic_pka"] < ph
-         and s.get("ionizable_idx") is not None
-         and mol.GetAtomWithIdx(s["ionizable_idx"]).GetTotalNumHs() > 0
-         and fc_map.get(s["ionizable_idx"], 0) >= 0],
-        key=lambda s: s["heuristic_pka"]
-    )
-    if not missed:
-        return current_smiles
-
-    site = missed[0]
-    try:
-        rw = Chem.RWMol(mol)
-        rw.GetAtomWithIdx(site["ionizable_idx"]).SetFormalCharge(-1)
-        Chem.SanitizeMol(rw)
-        corrected = Chem.MolToSmiles(rw, canonical=True)
-        log.append(
-            f"✓ pKa site correction: deprotonated {site['label']} "
-            f"(pKa={site['heuristic_pka']:.1f} < pH {ph:.1f})"
+        # Find acid sites: pKa < pH (with small buffer so borderline pKa ≠ pH doesn't flip)
+        missed = sorted(
+            [s for s in sites
+             if s["site_type"] == "acid"
+             and s["heuristic_pka"] < ph - 0.5
+             and s.get("ionizable_idx") is not None
+             and mol.GetAtomWithIdx(s["ionizable_idx"]).GetTotalNumHs() > 0
+             and fc_map.get(s["ionizable_idx"], 0) >= 0],
+            key=lambda s: s["heuristic_pka"]
         )
-        return corrected
-    except Exception as e:
-        log.append(f"⚠ Site correction failed ({site['label']}): {e}")
-        return current_smiles
+        if not missed:
+            break
+
+        site = missed[0]
+        try:
+            rw = Chem.RWMol(mol)
+            rw.GetAtomWithIdx(site["ionizable_idx"]).SetFormalCharge(-1)
+            Chem.SanitizeMol(rw)
+            result = Chem.MolToSmiles(rw, canonical=True)
+            n_corrected += 1
+            log.append(
+                f"✓ pKa correction [{n_corrected}]: deprotonated {site['label']} "
+                f"(pKa={site['heuristic_pka']:.1f} < pH {ph:.1f})"
+            )
+        except Exception as e:
+            log.append(f"⚠ Site correction failed ({site['label']}): {e}")
+            break
+
+    return result
 
 
 # ── protonate_pkanet: public API (unchanged signature) ───────────────────────
@@ -1591,7 +1736,7 @@ def prepare_ligand(
             log.append("✓ Neutral mode (keep input charge state)")
 
         elif actual_mode == "pkanet":
-            # ── pKaNET Cloud pipeline ─────────────────────────────────────
+            # ── pKaNET Cloud full pipeline ────────────────────────────────
             try:
                 prot, _, pka_log = protonate_pkanet(
                     raw, ph,
@@ -1609,6 +1754,8 @@ def prepare_ligand(
                     if vs:
                         prot = vs[0] if isinstance(vs, list) else vs
                         log.append(f"✓ Dimorphite-DL fallback pH {ph:.1f}")
+                    # Apply ionizable-site correction after dimorphite fallback
+                    prot = _apply_ionizable_site_correction(raw, prot, ph, log)
                 except Exception as e2:
                     log.append(f"⚠ Dimorphite-DL fallback skipped: {e2}")
 
@@ -1624,6 +1771,9 @@ def prepare_ligand(
                     log.append("⚠ Dimorphite-DL returned no variants — using input SMILES")
             except Exception as e:
                 log.append(f"⚠ Dimorphite-DL skipped: {e}")
+            # Post-correction: catch pKa sites Dimorphite missed
+            # (critical for flavonoids, polyphenols, catechols)
+            prot = _apply_ionizable_site_correction(raw, prot, ph, log)
 
         mol = Chem.MolFromSmiles(prot)
         if mol is None:
@@ -3633,3 +3783,37 @@ def draw_interaction_diagram_interactive(
     # Return minimal interactive HTML (full version in app.py _render_interactive_diagram)
     return json.dumps({"placements": residues_js, "W": W, "H": H,
                        "ligand_svg": lig_svg, "title": title})
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  CLI ENTRY POINT
+# ══════════════════════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    import argparse as _ap
+    _parser = _ap.ArgumentParser(
+        prog="standalone_core",
+        description="Anyone Can Dock — Standalone Core utilities",
+    )
+    _parser.add_argument(
+        "command", nargs="?", default="info",
+        choices=["setup", "info"],
+        help="setup = install dependencies  |  info = show status (default)",
+    )
+    _args = _parser.parse_args()
+
+    if _args.command == "setup":
+        setup_standalone(colab=PLATFORM["is_colab"])
+    else:
+        print(f"\n══ Anyone Can Dock — Environment Info ══")
+        print(f"  Python  : {PLATFORM['python']}")
+        print(f"  OS      : {PLATFORM['os']} / {PLATFORM['arch']}")
+        print(f"  Colab   : {PLATFORM['is_colab']}")
+        print(f"\n══ Dependency Status ══")
+        st = check_dependencies(verbose=True)
+        missing_py = [n for n, ok in st.items() if not ok and n != "obabel"]
+        if missing_py or not st.get("obabel"):
+            print(f"\n  Run `python standalone_core.py setup` to install missing packages.")
+        else:
+            print(f"\n  ✓  All dependencies OK.")
+            print(f"  Run: streamlit run standalone_app.py")
