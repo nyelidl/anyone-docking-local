@@ -1,8 +1,20 @@
 #!/usr/bin/env python3
 """
-app.py — Streamlit UI layer for Anyone Can Dock.
-All computation is delegated to core.py — this file contains only
-layout, widgets, session state, and 3D/2D visualisation.
+app.py — Streamlit UI for Anyone Can Dock (Local Edition).
+All computation is delegated to core.py.
+
+Platforms : macOS Intel · macOS Apple Silicon · Windows · Linux
+Python    : 3.11
+
+Setup:
+    brew install python@3.11 open-babel cairo pango
+    git clone https://github.com/nyelidl/anyone-docking-local.git
+    cd anyone-docking-local
+    python3.11 -m venv venv && source venv/bin/activate
+    pip install -r requirements.txt
+
+Run:
+    streamlit run app.py
 """
 
 import io
@@ -90,6 +102,53 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  STANDALONE — FIRST-RUN SETUP CHECK (sidebar)
+# ══════════════════════════════════════════════════════════════════════════════
+
+try:
+    from core import check_dependencies, setup_standalone, PLATFORM as _PLATFORM
+
+    with st.sidebar:
+        st.markdown("### ⚙️ Environment")
+        _os   = _PLATFORM["os"]
+        _arch = _PLATFORM["arch"]
+        st.caption(f"`{_os}` · `{_arch}` · Python `{_PLATFORM['python']}`")
+
+        if st.button("🔍 Check dependencies", key="_dep_check_btn"):
+            _dep = check_dependencies(verbose=False)
+            _bad = [k for k, v in _dep.items() if not v]
+            if _bad:
+                st.warning(f"Missing: {', '.join(_bad)}")
+                st.caption("Run:  `pip install -r requirements.txt`")
+            else:
+                st.success("All dependencies OK ✓")
+
+        if st.button("📦 Install missing packages", key="_dep_install_btn"):
+            with st.spinner("Installing…"):
+                import subprocess as _sp, sys as _sys
+                _dep2 = check_dependencies(verbose=False)
+                _pip_map = {
+                    "rdkit": "rdkit", "prody": "prody",
+                    "dimorphite_dl": "dimorphite_dl", "meeko": "meeko",
+                    "requests": "requests", "cairosvg": "cairosvg", "Pillow": "pillow",
+                }
+                _to_install = [_pip_map[k] for k, v in _dep2.items()
+                               if not v and k in _pip_map]
+                if _to_install:
+                    _sp.run([_sys.executable, "-m", "pip", "install"] + _to_install,
+                            capture_output=True)
+                    st.success("Done — please refresh the page.")
+                else:
+                    st.info("Nothing to install.")
+
+        st.markdown("---")
+        st.caption("First time?  Run in terminal:")
+        st.code("pip install -r requirements.txt", language="bash")
+        st.code("streamlit run app.py", language="bash")
+except Exception:
+    pass  # sidebar setup is non-critical
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  THEME + COLOUR HELPERS
@@ -4278,14 +4337,25 @@ st.markdown(
     "**pKaNET Cloud**, and **RDkit**."
 )
 st.markdown("**Basic** — single ligand. **Batch** — multiple ligands.")
-st.markdown("**🖥️ Run locally | 🌐 web-based interface**")
+st.markdown("**🖥️ Run locally | 🌐 Streamlit web interface**")
 
 if VINA_PATH is None:
     st.error(f"❌ Could not download Vina binary: {_vina_err}")
     st.stop()
 
 if not _OBABEL_OK:
-    st.error("❌ OpenBabel not found. Add `openbabel` to packages.txt and redeploy.")
+    import platform as _plt
+    _os = _plt.system().lower()
+    _hint = {
+        "darwin":  "brew install open-babel",
+        "linux":   "sudo apt-get install openbabel  OR  conda install -c conda-forge openbabel",
+        "windows": "https://github.com/openbabel/openbabel/releases",
+    }.get(_os, "install openbabel")
+    st.error(
+        f"❌ OpenBabel not found.\n\n"
+        f"Install: `{_hint}`\n\n"
+        f"Then restart the app:  `streamlit run app.py`"
+    )
     st.stop()
 
 st.markdown(f"{_pill('Vina 1.2.7 ready', 'success')} ", unsafe_allow_html=True)
