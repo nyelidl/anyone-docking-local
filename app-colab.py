@@ -81,6 +81,19 @@ try:
 except ImportError:
     _HEME_RESNAMES = {"HEM", "HEC", "HEA", "HEB", "HDD", "HDM"}
 
+# ── Colab / restricted-env obabel PATH patch ─────────────────────────────────
+import shutil as _shutil_ob, os as _os_ob
+if _shutil_ob.which("obabel") is None:
+    for _ob_candidate in [
+        "/usr/bin/obabel",
+        "/usr/local/bin/obabel",
+        "/opt/conda/bin/obabel",
+        "/home/user/.local/bin/obabel",
+    ]:
+        if _os_ob.path.isfile(_ob_candidate):
+            _ob_dir = _os_ob.path.dirname(_ob_candidate)
+            _os_ob.environ["PATH"] = _ob_dir + ":" + _os_ob.environ.get("PATH", "")
+            break
 # ══════════════════════════════════════════════════════════════════════════════
 #  PAGE CONFIG
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1534,7 +1547,6 @@ BATCH_WORKDIR.mkdir(exist_ok=True)
 def _cached_vina():
     return get_vina_binary()
 
-@st.cache_resource(show_spinner=False)
 def _cached_obabel():
     return check_obabel()
 
@@ -4285,7 +4297,20 @@ if VINA_PATH is None:
     st.stop()
 
 if not _OBABEL_OK:
-    st.error("❌ OpenBabel not found. Add `openbabel` to packages.txt and redeploy.")
+    import google.colab as _gc  # noqa
+    _is_colab = True
+except ImportError:
+    _is_colab = False
+try:
+if not _OBABEL_OK:
+    if _is_colab:
+        st.error(
+            "❌ OpenBabel not found in this Colab session.\n\n"
+            "Run this in a cell above and restart:\n"
+            "```\n!apt-get install -y -q openbabel\n```"
+        )
+    else:
+        st.error("❌ OpenBabel not found. Add `openbabel` to packages.txt and redeploy.")
     st.stop()
 
 st.markdown(f"{_pill('Vina 1.2.7 ready', 'success')} ", unsafe_allow_html=True)
