@@ -317,10 +317,33 @@ def is_cif_file(filepath: str) -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def check_obabel():
-    if _shutil.which("obabel") is None:
+    # shutil.which relies on PATH — may miss obabel in Colab/subprocess envs
+    obabel = _shutil.which("obabel")
+
+    # Fallback: check common install locations explicitly
+    if obabel is None:
+        for candidate in [
+            "/usr/bin/obabel",
+            "/usr/local/bin/obabel",
+            "/opt/conda/bin/obabel",
+            "/opt/homebrew/bin/obabel",   # macOS Apple Silicon
+            "/usr/local/Cellar/open-babel/3.1.1/bin/obabel",  # macOS Intel brew
+        ]:
+            if _shutil.os.path.isfile(candidate):
+                obabel = candidate
+                break
+
+    if obabel is None:
         hint = _OBABEL_INSTALL.get(PLATFORM["os"], "install openbabel")
         return False, f"obabel not found — {hint}"
-    _, out = run_cmd("obabel --version")
+
+    # Also patch os.environ PATH so subprocess calls work correctly
+    obabel_dir = str(Path(obabel).parent)
+    current_path = os.environ.get("PATH", "")
+    if obabel_dir not in current_path:
+        os.environ["PATH"] = obabel_dir + ":" + current_path
+
+    _, out = run_cmd([obabel, "--version"])
     return True, (out.splitlines()[0] if out else "ok")
 
 
