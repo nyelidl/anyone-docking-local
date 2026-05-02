@@ -4296,12 +4296,12 @@ if VINA_PATH is None:
     st.error(f"❌ Could not download Vina binary: {_vina_err}")
     st.stop()
 
-if not _OBABEL_OK:
+try:
     import google.colab as _gc  # noqa
     _is_colab = True
 except ImportError:
     _is_colab = False
-try:
+
 if not _OBABEL_OK:
     if _is_colab:
         st.error(
@@ -4312,7 +4312,7 @@ if not _OBABEL_OK:
     else:
         st.error("❌ OpenBabel not found. Add `openbabel` to packages.txt and redeploy.")
     st.stop()
-
+    
 st.markdown(f"{_pill('Vina 1.2.7 ready', 'success')} ", unsafe_allow_html=True)
 st.markdown('<hr class="step-divider">', unsafe_allow_html=True)
 
