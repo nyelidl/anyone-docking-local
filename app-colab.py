@@ -1,8 +1,20 @@
 #!/usr/bin/env python3
 """
-app.py — Streamlit UI layer for Anyone Can Dock.
-All computation is delegated to core.py — this file contains only
-layout, widgets, session state, and 3D/2D visualisation.
+app.py — Streamlit UI for Anyone Can Dock (Local Edition).
+All computation is delegated to core.py.
+
+Platforms : macOS Intel · macOS Apple Silicon · Windows · Linux
+Python    : 3.11
+
+Setup:
+    brew install python@3.11 open-babel cairo pango
+    git clone https://github.com/nyelidl/anyone-docking-local.git
+    cd anyone-docking-local
+    python3.11 -m venv venv && source venv/bin/activate
+    pip install -r requirements.txt
+
+Run:
+    streamlit run app.py
 """
 
 import io
@@ -36,6 +48,7 @@ from core import (
     stamp_png,
     is_cif_file,
     convert_cif_to_pdb,
+    PLATFORM,
 )
 
 try:
@@ -81,19 +94,6 @@ try:
 except ImportError:
     _HEME_RESNAMES = {"HEM", "HEC", "HEA", "HEB", "HDD", "HDM"}
 
-# ── Colab / restricted-env obabel PATH patch ─────────────────────────────────
-import shutil as _shutil_ob, os as _os_ob
-if _shutil_ob.which("obabel") is None:
-    for _ob_candidate in [
-        "/usr/bin/obabel",
-        "/usr/local/bin/obabel",
-        "/opt/conda/bin/obabel",
-        "/home/user/.local/bin/obabel",
-    ]:
-        if _os_ob.path.isfile(_ob_candidate):
-            _ob_dir = _os_ob.path.dirname(_ob_candidate)
-            _os_ob.environ["PATH"] = _ob_dir + ":" + _os_ob.environ.get("PATH", "")
-            break
 # ══════════════════════════════════════════════════════════════════════════════
 #  PAGE CONFIG
 # ══════════════════════════════════════════════════════════════════════════════
@@ -103,6 +103,53 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  STANDALONE — FIRST-RUN SETUP CHECK (sidebar)
+# ══════════════════════════════════════════════════════════════════════════════
+
+try:
+    from core import check_dependencies, setup_standalone, PLATFORM as _PLATFORM
+
+    with st.sidebar:
+        st.markdown("### ⚙️ Environment")
+        _os   = _PLATFORM["os"]
+        _arch = _PLATFORM["arch"]
+        st.caption(f"`{_os}` · `{_arch}` · Python `{_PLATFORM['python']}`")
+
+        if st.button("🔍 Check dependencies", key="_dep_check_btn"):
+            _dep = check_dependencies(verbose=False)
+            _bad = [k for k, v in _dep.items() if not v]
+            if _bad:
+                st.warning(f"Missing: {', '.join(_bad)}")
+                st.caption("Run:  `pip install -r requirements.txt`")
+            else:
+                st.success("All dependencies OK ✓")
+
+        if st.button("📦 Install missing packages", key="_dep_install_btn"):
+            with st.spinner("Installing…"):
+                import subprocess as _sp, sys as _sys
+                _dep2 = check_dependencies(verbose=False)
+                _pip_map = {
+                    "rdkit": "rdkit", "prody": "prody",
+                    "dimorphite_dl": "dimorphite_dl", "meeko": "meeko",
+                    "requests": "requests", "cairosvg": "cairosvg", "Pillow": "pillow",
+                }
+                _to_install = [_pip_map[k] for k, v in _dep2.items()
+                               if not v and k in _pip_map]
+                if _to_install:
+                    _sp.run([_sys.executable, "-m", "pip", "install"] + _to_install,
+                            capture_output=True)
+                    st.success("Done — please refresh the page.")
+                else:
+                    st.info("Nothing to install.")
+
+        st.markdown("---")
+        st.caption("First time?  Run in terminal:")
+        st.code("pip install -r requirements.txt", language="bash")
+        st.code("streamlit run app.py", language="bash")
+except Exception:
+    pass  # sidebar setup is non-critical
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  THEME + COLOUR HELPERS
@@ -1547,11 +1594,8 @@ BATCH_WORKDIR.mkdir(exist_ok=True)
 def _cached_vina():
     return get_vina_binary()
 
-def _cached_obabel():
-    return check_obabel()
-
 VINA_PATH, _vina_err      = _cached_vina()
-_OBABEL_OK, _OBABEL_VER   = _cached_obabel()
+_OBABEL_OK, _OBABEL_VER   = check_obabel()   # no cache — must run after PATH injection
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -4296,23 +4340,24 @@ if VINA_PATH is None:
     st.error(f"❌ Could not download Vina binary: {_vina_err}")
     st.stop()
 
-try:
-    import google.colab as _gc  # noqa
-    _is_colab = True
-except ImportError:
-    _is_colab = False
-
 if not _OBABEL_OK:
+    _is_colab = PLATFORM.get("is_colab", False)
     if _is_colab:
-        st.error(
-            "❌ OpenBabel not found in this Colab session.\n\n"
-            "Run this in a cell above and restart:\n"
-            "```\n!apt-get install -y -q openbabel\n```"
-        )
+        st.error("❌ OpenBabel not found in this Colab session.\n\nRun this in a cell above and restart:")
+        st.code("!apt-get install -y -q openbabel", language="bash")
     else:
-        st.error("❌ OpenBabel not found. Add `openbabel` to packages.txt and redeploy.")
+        _hint = {
+            "darwin":  "brew install open-babel",
+            "linux":   "sudo apt-get install openbabel  OR  conda install -c conda-forge openbabel",
+            "windows": "https://github.com/openbabel/openbabel/releases",
+        }.get(PLATFORM["os"], "install openbabel")
+        st.error(
+            f"❌ OpenBabel not found.\n\n"
+            f"Install: `{_hint}`\n\n"
+            f"Then restart the app:  `streamlit run app.py`"
+        )
     st.stop()
-    
+
 st.markdown(f"{_pill('Vina 1.2.7 ready', 'success')} ", unsafe_allow_html=True)
 st.markdown('<hr class="step-divider">', unsafe_allow_html=True)
 
