@@ -1595,7 +1595,13 @@ def _cached_vina():
     return get_vina_binary()
 
 VINA_PATH, _vina_err      = _cached_vina()
-_OBABEL_OK, _OBABEL_VER   = check_obabel()   # no cache — must run after PATH injection
+if "obabel_checked" not in st.session_state:
+    _ok, _ver = check_obabel()
+    st.session_state["obabel_checked"] = True
+    st.session_state["obabel_ok"] = _ok
+    st.session_state["obabel_ver"] = _ver
+_OBABEL_OK  = st.session_state["obabel_ok"]
+_OBABEL_VER = st.session_state["obabel_ver"]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
