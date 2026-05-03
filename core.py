@@ -317,34 +317,27 @@ def is_cif_file(filepath: str) -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def check_obabel():
-    # shutil.which relies on PATH — may miss obabel in Colab/subprocess envs
-    obabel = _shutil.which("obabel")
-
-    # Fallback: check common install locations explicitly
-    if obabel is None:
-        for candidate in [
-            "/usr/bin/obabel",
-            "/usr/local/bin/obabel",
-            "/opt/conda/bin/obabel",
-            "/opt/homebrew/bin/obabel",   # macOS Apple Silicon
-            "/usr/local/Cellar/open-babel/3.1.1/bin/obabel",  # macOS Intel brew
-        ]:
-            if _shutil.os.path.isfile(candidate):
-                obabel = candidate
-                break
-
-    if obabel is None:
+    # Search obabel from multiple candidate paths.
+    # Covers: brew (macOS), apt (Linux), conda-forge (Colab/Linux),
+    #         Windows installer, and anything already on PATH.
+    _CANDIDATES = [
+        _shutil.which("obabel"),           # already on PATH (macOS brew, Windows, apt)
+        "/opt/conda/bin/obabel",           # conda-forge in Colab / miniforge
+        "/usr/local/bin/obabel",           # apt-get or conda on some Linux
+        "/usr/bin/obabel",                 # system apt
+        "/opt/homebrew/bin/obabel",        # Homebrew Apple Silicon (fallback)
+        "/usr/local/homebrew/bin/obabel",  # Homebrew Intel (fallback)
+    ]
+    found = next((p for p in _CANDIDATES if p and os.path.isfile(p)), None)
+    if found is None:
         hint = _OBABEL_INSTALL.get(PLATFORM["os"], "install openbabel")
         return False, f"obabel not found — {hint}"
-
-    # Also patch os.environ PATH so subprocess calls work correctly
-    obabel_dir = str(Path(obabel).parent)
-    current_path = os.environ.get("PATH", "")
-    if obabel_dir not in current_path:
-        os.environ["PATH"] = obabel_dir + ":" + current_path
-
-    _, out = run_cmd([obabel, "--version"])
-    return True, (out.splitlines()[0] if out else "ok")
+    # If found outside PATH, inject its directory so subprocess calls work
+    if not _shutil.which("obabel"):
+        _dir = os.path.dirname(found)
+        os.environ["PATH"] = _dir + os.pathsep + os.environ.get("PATH", "")
+    _, out = run_cmd("obabel --version")
+    return True, (out.splitlines()[0] if out else f"ok ({found})")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
