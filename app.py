@@ -5414,7 +5414,7 @@ with tab_batch:
         # ── Protonation mode (same options as single-ligand tab) ─────────────
         _b_prot_mode_ui = st.radio(
             "Protonation mode",
-            ["🧪 Dimorphite-DL", "🧬 pKaNET Cloud", "⚛️ Neutral (keep input)"],
+            ["🧪 Dimorphite-DL", "⚛️ Neutral (keep input)", "🧬 pKaNET Cloud"],
             horizontal=True,
             key="b_prot_mode_ui",
             help=(
@@ -5485,8 +5485,8 @@ with tab_batch:
         b_ph_val      = st.session_state.get("b_ph", 7.4)
         _b_prot_mode  = {
             "🧪 Dimorphite-DL":          "dimorphite",
-            "🧬 pKaNET Cloud":            "pkanet",
             "⚛️ Neutral (keep input)":   "neutral",
+            "🧬 pKaNET Cloud":            "pkanet",
         }.get(st.session_state.get("b_prot_mode_ui", "🧪 Dimorphite-DL"), "dimorphite")
         _b_use_pubchem  = False
         _b_pkanet_max_tau = st.session_state.get("b_pkanet_max_tau", 8)
