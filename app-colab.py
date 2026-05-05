@@ -48,7 +48,6 @@ from core import (
     stamp_png,
     is_cif_file,
     convert_cif_to_pdb,
-    PLATFORM,
 )
 
 try:
@@ -1594,14 +1593,12 @@ BATCH_WORKDIR.mkdir(exist_ok=True)
 def _cached_vina():
     return get_vina_binary()
 
+@st.cache_resource(show_spinner=False)
+def _cached_obabel():
+    return check_obabel()
+
 VINA_PATH, _vina_err      = _cached_vina()
-if "obabel_checked" not in st.session_state:
-    _ok, _ver = check_obabel()
-    st.session_state["obabel_checked"] = True
-    st.session_state["obabel_ok"] = _ok
-    st.session_state["obabel_ver"] = _ver
-_OBABEL_OK  = st.session_state["obabel_ok"]
-_OBABEL_VER = st.session_state["obabel_ver"]
+_OBABEL_OK, _OBABEL_VER   = _cached_obabel()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -4347,21 +4344,18 @@ if VINA_PATH is None:
     st.stop()
 
 if not _OBABEL_OK:
-    _is_colab = PLATFORM.get("is_colab", False)
-    if _is_colab:
-        st.error("❌ OpenBabel not found in this Colab session.\n\nRun this in a cell above and restart:")
-        st.code("!apt-get install -y -q openbabel", language="bash")
-    else:
-        _hint = {
-            "darwin":  "brew install open-babel",
-            "linux":   "sudo apt-get install openbabel  OR  conda install -c conda-forge openbabel",
-            "windows": "https://github.com/openbabel/openbabel/releases",
-        }.get(PLATFORM["os"], "install openbabel")
-        st.error(
-            f"❌ OpenBabel not found.\n\n"
-            f"Install: `{_hint}`\n\n"
-            f"Then restart the app:  `streamlit run app.py`"
-        )
+    import platform as _plt
+    _os = _plt.system().lower()
+    _hint = {
+        "darwin":  "brew install open-babel",
+        "linux":   "sudo apt-get install openbabel  OR  conda install -c conda-forge openbabel",
+        "windows": "https://github.com/openbabel/openbabel/releases",
+    }.get(_os, "install openbabel")
+    st.error(
+        f"❌ OpenBabel not found.\n\n"
+        f"Install: `{_hint}`\n\n"
+        f"Then restart the app:  `streamlit run app.py`"
+    )
     st.stop()
 
 st.markdown(f"{_pill('Vina 1.2.7 ready', 'success')} ", unsafe_allow_html=True)
@@ -5417,6 +5411,30 @@ with tab_batch:
         b_ph = st.number_input("Target pH", 0.0, 14.0, 7.4, 0.1, key="b_ph")
         _b_use_pubchem = False
 
+        # ── Protonation mode (same options as single-ligand tab) ─────────────
+        _b_prot_mode_ui = st.radio(
+            "Protonation mode",
+            ["🧪 Dimorphite-DL", "⚛️ Neutral (keep input)", "🧬 pKaNET Cloud"],
+            horizontal=True,
+            key="b_prot_mode_ui",
+            help=(
+                "**Dimorphite-DL** — fast rule-based protonation.\n\n"
+                "**pKaNET Cloud** — full tautomer + microstate ranking "
+                "(recommended for polyphenols, nucleotides, charged ligands). "
+                "⚠️ ~5–30 s per ligand.\n\n"
+                "**Neutral** — use SMILES as-is."
+            ),
+        )
+        _b_pkanet_max_tau = 8
+        _b_pkanet_ph_win  = 1.0
+        if _b_prot_mode_ui == "🧬 pKaNET Cloud":
+            st.info("⚠️ pKaNET may take 5–30 s per ligand (built-in algorithm, no extra file needed).")
+            _bc1, _bc2 = st.columns(2)
+            with _bc1:
+                _b_pkanet_max_tau = st.slider("Max tautomers", 1, 20, 8, key="b_pkanet_max_tau")
+            with _bc2:
+                _b_pkanet_ph_win  = st.slider("pH window", 0.2, 2.0, 1.0, 0.1, key="b_pkanet_ph_win")
+
     with col_b2:
         st.markdown("**Redocking validation**")
         b_do_redock = st.checkbox(
@@ -5465,7 +5483,11 @@ with tab_batch:
         rec_pdbqt = st.session_state.get("b_receptor_pdbqt")
         config    = st.session_state.get("b_config_txt")
         b_ph_val      = st.session_state.get("b_ph", 7.4)
-        _b_prot_mode  = "dimorphite"
+        _b_prot_mode  = {
+            "🧪 Dimorphite-DL":          "dimorphite",
+            "⚛️ Neutral (keep input)":   "neutral",
+            "🧬 pKaNET Cloud":            "pkanet",
+        }.get(st.session_state.get("b_prot_mode_ui", "🧪 Dimorphite-DL"), "dimorphite")
         _b_use_pubchem  = False
         _b_pkanet_max_tau = st.session_state.get("b_pkanet_max_tau", 8)
         _b_pkanet_ph_win  = st.session_state.get("b_pkanet_ph_win", 1.0)
