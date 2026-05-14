@@ -4568,6 +4568,21 @@ with tab_basic:
                 "pH window", 0.2, 2.0, 1.0, 0.1, key="pkanet_ph_win",
                 help="Dimorphite-DL enumerates states in [pH − window/2, pH + window/2].",
             )
+            st.radio(
+                "Stereochemistry for undefined chiral center",
+                [
+                    "Keep input / auto",
+                    "Force R if undefined",
+                    "Force S if undefined",
+                ],
+                index=0,
+                horizontal=True,
+                key="pkanet_stereo_ui",
+                help=(
+                    "Used only when the SMILES has one undefined chiral center. "
+                    "If the SMILES already contains stereochemistry (@/@@), ACD keeps the input stereochemistry."
+                ),
+            )
         st.info(
             "🧬 pKaNET Cloud mode — tautomer enumeration + 8-component HH scoring. "
             "Built-in algorithm, no extra files required. May take 5–30 s per ligand.",
@@ -4602,6 +4617,12 @@ with tab_basic:
             _use_pubchem    = st.session_state.get("pkanet_use_pubchem", False)
             _pkanet_max_tau = st.session_state.get("pkanet_max_tau", 8)
             _pkanet_ph_win  = st.session_state.get("pkanet_ph_win", 1.0)
+            _pkanet_stereo_ui = st.session_state.get("pkanet_stereo_ui", "Keep input / auto")
+            _pkanet_stereo_key = {
+                "Keep input / auto": "keep_input",
+                "Force R if undefined": "R",
+                "Force S if undefined": "S",
+            }.get(_pkanet_stereo_ui, "keep_input")
 
             if "Upload" in _mode:
                 _sfobj = st.session_state.get("lig_struct_file")
@@ -4621,18 +4642,21 @@ with tab_basic:
                         st.error(f"❌ Could not read structure: {e}"); st.stop()
                     result = prepare_ligand(smiles_in, lig_name, ph_in, WORKDIR,
                                             mode=_prot_mode_key, use_pubchem=_use_pubchem,
-                                            max_tautomers=_pkanet_max_tau, ph_window=_pkanet_ph_win)
+                                            max_tautomers=_pkanet_max_tau, ph_window=_pkanet_ph_win,
+                                            pkanet_stereo_choice=_pkanet_stereo_key)
             elif "Ketcher" in _mode:
                 smiles_in = st.session_state.get("ketcher_smi", "").strip()
                 if not smiles_in:
                     st.error("No molecule drawn in Ketcher."); st.stop()
                 result = prepare_ligand(smiles_in, lig_name, ph_in, WORKDIR,
                                         mode=_prot_mode_key, use_pubchem=_use_pubchem,
-                                        max_tautomers=_pkanet_max_tau, ph_window=_pkanet_ph_win)
+                                        max_tautomers=_pkanet_max_tau, ph_window=_pkanet_ph_win,
+                                        pkanet_stereo_choice=_pkanet_stereo_key)
             else:
                 result = prepare_ligand(smiles_in, lig_name, ph_in, WORKDIR,
                                         mode=_prot_mode_key, use_pubchem=_use_pubchem,
-                                        max_tautomers=_pkanet_max_tau, ph_window=_pkanet_ph_win)
+                                        max_tautomers=_pkanet_max_tau, ph_window=_pkanet_ph_win,
+                                        pkanet_stereo_choice=_pkanet_stereo_key)
 
         if result["success"]:
             st.session_state.update({
@@ -4812,14 +4836,22 @@ with tab_basic:
             ph_val = st.session_state.get("ph_in", 7.4)
             _rd_prot_mode = st.session_state.get("prot_mode", "⚡ Fast (Dimorphite-DL)")
             _rd_prot_mode = {"⚡ Fast (Dimorphite-DL)": "dimorphite",
-                              "🔬 Neutral (add H only)": "neutral"}.get(_rd_prot_mode, "dimorphite")
+                              "🔬 Neutral (add H only)": "neutral",
+                              "🧬 pKaNET Cloud": "pkanet"}.get(_rd_prot_mode, "dimorphite")
             _rd_use_pubchem = False
             _rd_max_tau = st.session_state.get("pkanet_max_tau", 8)
             _rd_ph_win  = st.session_state.get("pkanet_ph_win", 1.0)
+            _rd_stereo_ui = st.session_state.get("pkanet_stereo_ui", "Keep input / auto")
+            _rd_stereo_key = {
+                "Keep input / auto": "keep_input",
+                "Force R if undefined": "R",
+                "Force S if undefined": "S",
+            }.get(_rd_stereo_ui, "keep_input")
             with st.spinner(f"Docking reference ligand ({rd_nm})…"):
                 rd_prep = prepare_ligand(rd_smi, "redock_" + rd_nm, ph_val, WORKDIR,
                                          mode=_rd_prot_mode, use_pubchem=_rd_use_pubchem,
-                                         max_tautomers=_rd_max_tau, ph_window=_rd_ph_win)
+                                         max_tautomers=_rd_max_tau, ph_window=_rd_ph_win,
+                                         pkanet_stereo_choice=_rd_stereo_key)
                 if rd_prep["success"]:
                     rd_dock = run_vina(
                         st.session_state.receptor_pdbqt, rd_prep["pdbqt"],
@@ -5434,6 +5466,17 @@ with tab_batch:
                 _b_pkanet_max_tau = st.slider("Max tautomers", 1, 20, 8, key="b_pkanet_max_tau")
             with _bc2:
                 _b_pkanet_ph_win  = st.slider("pH window", 0.2, 2.0, 1.0, 0.1, key="b_pkanet_ph_win")
+            st.radio(
+                "Stereochemistry for undefined chiral center",
+                ["Keep input / auto", "Force R if undefined", "Force S if undefined"],
+                index=0,
+                horizontal=True,
+                key="b_pkanet_stereo_ui",
+                help=(
+                    "Used only when each SMILES has one undefined chiral center. "
+                    "If a SMILES already contains @/@@, ACD keeps the input stereochemistry."
+                ),
+            )
 
     with col_b2:
         st.markdown("**Redocking validation**")
@@ -5491,6 +5534,12 @@ with tab_batch:
         _b_use_pubchem  = False
         _b_pkanet_max_tau = st.session_state.get("b_pkanet_max_tau", 8)
         _b_pkanet_ph_win  = st.session_state.get("b_pkanet_ph_win", 1.0)
+        _b_pkanet_stereo_ui = st.session_state.get("b_pkanet_stereo_ui", "Keep input / auto")
+        _b_pkanet_stereo_key = {
+            "Keep input / auto": "keep_input",
+            "Force R if undefined": "R",
+            "Force S if undefined": "S",
+        }.get(_b_pkanet_stereo_ui, "keep_input")
 
         smiles_pairs = []
         struct_file_pairs = []
@@ -5537,7 +5586,8 @@ with tab_batch:
             with st.spinner(f"Docking reference ligand ({rd_nm})…"):
                 rd_prep = prepare_ligand(rd_smi, "redock_" + rd_nm, b_ph_val, BATCH_WORKDIR,
                                          mode=_b_prot_mode, use_pubchem=_b_use_pubchem,
-                                         max_tautomers=_b_pkanet_max_tau, ph_window=_b_pkanet_ph_win)
+                                         max_tautomers=_b_pkanet_max_tau, ph_window=_b_pkanet_ph_win,
+                                         pkanet_stereo_choice=_b_pkanet_stereo_key)
                 if rd_prep["success"]:
                     rd_dock = run_vina(rec_pdbqt, rd_prep["pdbqt"], config,
                         VINA_PATH, b_exh, b_nm, b_er, BATCH_WORKDIR, "redock_" + rd_nm)
@@ -5589,11 +5639,13 @@ with tab_batch:
                         all_logs.append(f"[{name}] PREP ERROR: {e}"); continue
                     prep = prepare_ligand(smi, name, b_ph_val, BATCH_WORKDIR,
                                           mode=_b_prot_mode, use_pubchem=_b_use_pubchem,
-                                          max_tautomers=_b_pkanet_max_tau, ph_window=_b_pkanet_ph_win)
+                                          max_tautomers=_b_pkanet_max_tau, ph_window=_b_pkanet_ph_win,
+                                          pkanet_stereo_choice=_b_pkanet_stereo_key)
             else:
                 prep = prepare_ligand(smi, name, b_ph_val, BATCH_WORKDIR,
                                       mode=_b_prot_mode, use_pubchem=_b_use_pubchem,
-                                      max_tautomers=_b_pkanet_max_tau, ph_window=_b_pkanet_ph_win)
+                                      max_tautomers=_b_pkanet_max_tau, ph_window=_b_pkanet_ph_win,
+                                      pkanet_stereo_choice=_b_pkanet_stereo_key)
 
             if not prep["success"]:
                 results.append({"Name": name, "SMILES": smi, "Charge": None, "Top Score": None, "Status": f"PREP FAILED: {prep['error']}"})
