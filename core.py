@@ -1595,6 +1595,85 @@ def _apply_ionizable_site_correction(original_smiles: str, current_smiles: str,
     return result
 
 
+# ── Stereochemistry selector for pKaNET docking ─────────────────────────────
+
+def _pkanet_stereo_status(smiles: str) -> dict:
+    """Detect assigned and undefined tetrahedral stereocenters in a SMILES."""
+    from rdkit import Chem
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return {"valid": False, "assigned": 0, "unassigned": 0, "centers": []}
+    centers = Chem.FindMolChiralCenters(
+        mol, includeUnassigned=True, useLegacyImplementation=False
+    )
+    assigned = [(i, lab) for i, lab in centers if lab in ("R", "S")]
+    unassigned = [(i, lab) for i, lab in centers if lab == "?"]
+    return {
+        "valid": True,
+        "assigned": len(assigned),
+        "unassigned": len(unassigned),
+        "centers": centers,
+    }
+
+
+def _select_pkanet_stereoisomer(smiles: str, stereo_choice: str = "keep_input") -> tuple[str, list[str], dict]:
+    """
+    Resolve R/S only when the input SMILES has exactly one undefined chiral center.
+
+    Rules:
+      - If the SMILES already contains assigned stereochemistry (@/@@; RDKit R/S), keep it.
+      - If stereo_choice is R or S and exactly one undefined center exists, generate that isomer.
+      - If no center or multiple undefined centers exist, keep input to avoid unsafe assignment.
+    """
+    from rdkit import Chem
+    from rdkit.Chem.EnumerateStereoisomers import EnumerateStereoisomers, StereoEnumerationOptions
+
+    log = []
+    choice = (stereo_choice or "keep_input").strip().upper()
+    if choice in {"KEEP", "KEEP_INPUT", "AS_IS", "AUTO", ""}:
+        choice = "KEEP_INPUT"
+
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        raise ValueError(f"RDKit could not parse SMILES: {smiles[:60]}")
+
+    status = _pkanet_stereo_status(smiles)
+    if status["assigned"] > 0:
+        log.append("✓ Stereochemistry already defined in input SMILES (@/@@); keeping input stereochemistry")
+        return Chem.MolToSmiles(mol, isomericSmiles=True, canonical=True), log, status
+
+    if choice not in {"R", "S"}:
+        if status["unassigned"] > 0:
+            log.append(f"ℹ Undefined stereocenter(s) detected: {status['unassigned']}; keeping input without forced R/S")
+        return Chem.MolToSmiles(mol, isomericSmiles=True, canonical=True), log, status
+
+    if status["unassigned"] == 0:
+        log.append(f"ℹ No undefined stereocenter detected; requested {choice} ignored")
+        return Chem.MolToSmiles(mol, isomericSmiles=True, canonical=True), log, status
+
+    if status["unassigned"] != 1:
+        log.append(
+            f"⚠ {status['unassigned']} undefined stereocenters detected; "
+            "R/S selector is only applied to single-center ligands. Keeping input."
+        )
+        return Chem.MolToSmiles(mol, isomericSmiles=True, canonical=True), log, status
+
+    opts = StereoEnumerationOptions(onlyUnassigned=True, unique=True)
+    isomers = list(EnumerateStereoisomers(mol, options=opts))
+    for iso in isomers:
+        centers = Chem.FindMolChiralCenters(
+            iso, includeUnassigned=True, useLegacyImplementation=False
+        )
+        labels = [lab for _, lab in centers if lab in ("R", "S")]
+        if len(labels) == 1 and labels[0] == choice:
+            smi = Chem.MolToSmiles(iso, isomericSmiles=True, canonical=True)
+            log.append(f"✓ Undefined stereocenter resolved as {choice} for docking")
+            return smi, log, status
+
+    log.append(f"⚠ Could not generate requested {choice} stereoisomer; keeping input")
+    return Chem.MolToSmiles(mol, isomericSmiles=True, canonical=True), log, status
+
+
 # ── protonate_pkanet: public API (unchanged signature) ───────────────────────
 
 def protonate_pkanet(
@@ -1603,6 +1682,7 @@ def protonate_pkanet(
     use_pubchem: bool = False,
     max_tautomers: int = 8,
     ph_window: float = 1.0,
+    stereo_choice: str = "keep_input",
 ) -> tuple:
     """
     pKaNET Cloud protonation pipeline (Hengphasatporn et al. 2026).
@@ -1612,7 +1692,12 @@ def protonate_pkanet(
     from rdkit.Chem.MolStandardize import rdMolStandardize
 
     log       = []
-    canonical = smiles.strip()
+
+    # Stage 0: optional R/S selection for one undefined chiral center.
+    canonical, stereo_log, _stereo_status = _select_pkanet_stereoisomer(
+        smiles.strip(), stereo_choice
+    )
+    log.extend(stereo_log)
 
     # Standardize
     try:
@@ -1740,6 +1825,7 @@ def prepare_ligand(
     use_pubchem: bool = False,
     max_tautomers: int = 8,
     ph_window: float = 1.0,
+    pkanet_stereo_choice: str = "keep_input",
 ) -> dict:
     """
     Ligand preparation aligned to the simpler, stable version the user preferred.
@@ -1782,6 +1868,7 @@ def prepare_ligand(
                     use_pubchem=use_pubchem,
                     max_tautomers=max_tautomers,
                     ph_window=ph_window,
+                    stereo_choice=pkanet_stereo_choice,
                 )
                 log.extend(pka_log)
                 log.append("✓ pKaNET Cloud protonation applied")
@@ -1868,6 +1955,7 @@ def prepare_ligand(
             "charged_atoms":     charge_info["charged_atoms"],
             "is_zwitterion":     charge_info["is_zwitterion"],
             "protonation_mode":  actual_mode,
+            "pkanet_stereo_choice": pkanet_stereo_choice,
             "log":               log,
         }
 
