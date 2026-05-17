@@ -1,20 +1,8 @@
 #!/usr/bin/env python3
 """
-app.py — Streamlit UI for Anyone Can Dock (Local Edition).
-All computation is delegated to core.py.
-
-Platforms : macOS Intel · macOS Apple Silicon · Windows · Linux
-Python    : 3.11
-
-Setup:
-    brew install python@3.11 open-babel cairo pango
-    git clone https://github.com/nyelidl/anyone-docking-local.git
-    cd anyone-docking-local
-    python3.11 -m venv venv && source venv/bin/activate
-    pip install -r requirements.txt
-
-Run:
-    streamlit run app.py
+app.py — Streamlit UI layer for Anyone Can Dock.
+All computation is delegated to core.py — this file contains only
+layout, widgets, session state, and 3D/2D visualisation.
 """
 
 import io
@@ -48,6 +36,7 @@ from core import (
     stamp_png,
     is_cif_file,
     convert_cif_to_pdb,
+    scan_hetatm_residues,
 )
 
 try:
@@ -102,53 +91,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  STANDALONE — FIRST-RUN SETUP CHECK (sidebar)
-# ══════════════════════════════════════════════════════════════════════════════
-
-try:
-    from core import check_dependencies, setup_standalone, PLATFORM as _PLATFORM
-
-    with st.sidebar:
-        st.markdown("### ⚙️ Environment")
-        _os   = _PLATFORM["os"]
-        _arch = _PLATFORM["arch"]
-        st.caption(f"`{_os}` · `{_arch}` · Python `{_PLATFORM['python']}`")
-
-        if st.button("🔍 Check dependencies", key="_dep_check_btn"):
-            _dep = check_dependencies(verbose=False)
-            _bad = [k for k, v in _dep.items() if not v]
-            if _bad:
-                st.warning(f"Missing: {', '.join(_bad)}")
-                st.caption("Run:  `pip install -r requirements.txt`")
-            else:
-                st.success("All dependencies OK ✓")
-
-        if st.button("📦 Install missing packages", key="_dep_install_btn"):
-            with st.spinner("Installing…"):
-                import subprocess as _sp, sys as _sys
-                _dep2 = check_dependencies(verbose=False)
-                _pip_map = {
-                    "rdkit": "rdkit", "prody": "prody",
-                    "dimorphite_dl": "dimorphite_dl", "meeko": "meeko",
-                    "requests": "requests", "cairosvg": "cairosvg", "Pillow": "pillow",
-                }
-                _to_install = [_pip_map[k] for k, v in _dep2.items()
-                               if not v and k in _pip_map]
-                if _to_install:
-                    _sp.run([_sys.executable, "-m", "pip", "install"] + _to_install,
-                            capture_output=True)
-                    st.success("Done — please refresh the page.")
-                else:
-                    st.info("Nothing to install.")
-
-        st.markdown("---")
-        st.caption("First time?  Run in terminal:")
-        st.code("pip install -r requirements.txt", language="bash")
-        st.code("streamlit run app.py", language="bash")
-except Exception:
-    pass  # sidebar setup is non-critical
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  THEME + COLOUR HELPERS
@@ -265,7 +207,59 @@ def _rcsb_entry_has_no_missing_residues(entry_json: dict):
     return None
 
 
-def _search_protein_rcsb(query: str, top_n: int = 25) -> list[dict]:
+def _get_rcsb_ligands(_req, pdb_id: str, entry_json: dict | None = None) -> list[str]:
+    """Return likely co-crystal ligand/component IDs for an RCSB entry.
+
+    The RCSB entry may contain many non-polymer entities, including waters,
+    metal ions, salts, buffers, and crystallization additives. For search-result
+    display, keep likely ligand/cofactor IDs and hide common solvent/additive
+    components so the user can quickly identify dockable structures.
+    """
+    _exclude = {
+        "HOH", "WAT", "DOD", "SOL",
+        "NA", "CL", "K", "CA", "MG", "ZN", "MN", "FE", "CU", "CO", "NI", "CD", "HG",
+        "SO4", "PO4", "NO3", "SCN", "ACT", "ACY", "FMT",
+        "GOL", "EDO", "PEG", "PGE", "PG4", "MPD", "DMS", "DMSO", "IPA", "EOH", "MOH",
+        "TRS", "MES", "EPE", "BME", "ACE", "IOD", "BR",
+    }
+
+    ids = []
+    try:
+        entry_json = entry_json or {}
+        ids = (
+            (entry_json.get("rcsb_entry_container_identifiers", {}) or {})
+            .get("non_polymer_entity_ids", [])
+            or []
+        )
+    except Exception:
+        ids = []
+
+    ligands = []
+    seen = set()
+    for ent_id in ids:
+        try:
+            r = _req.get(
+                f"https://data.rcsb.org/rest/v1/core/nonpolymer_entity/{pdb_id}/{ent_id}",
+                timeout=8,
+            )
+            if r.status_code != 200:
+                continue
+            data = r.json() or {}
+            comp_id = str(
+                ((data.get("pdbx_entity_nonpoly", {}) or {}).get("comp_id", ""))
+                or ((data.get("chem_comp", {}) or {}).get("id", ""))
+            ).strip().upper()
+            if not comp_id or comp_id in _exclude or comp_id in seen:
+                continue
+            seen.add(comp_id)
+            ligands.append(comp_id)
+        except Exception:
+            continue
+
+    return ligands
+
+
+def _search_protein_rcsb(query: str, top_n: int = 30) -> list[dict]:
     """
     Search RCSB by protein/keyword and return entry summaries.
     Uses Search API for IDs, then Data API for metadata.
@@ -324,6 +318,8 @@ def _search_protein_rcsb(query: str, top_n: int = 25) -> list[dict]:
         method = ""
         protein_name = ""
         no_missing = None
+        ligands = []
+        ligand_status = "No ligand"
 
         try:
             r2 = _req.get(
@@ -345,6 +341,8 @@ def _search_protein_rcsb(query: str, top_n: int = 25) -> list[dict]:
                 if exptl and isinstance(exptl, list):
                     method = str((exptl[0] or {}).get("method", "") or "")
                 no_missing = _rcsb_entry_has_no_missing_residues(ej)
+                ligands = _get_rcsb_ligands(_req, pdb_id, ej)
+                ligand_status = ", ".join(ligands) if ligands else "No ligand"
         except Exception:
             pass
 
@@ -367,6 +365,8 @@ def _search_protein_rcsb(query: str, top_n: int = 25) -> list[dict]:
             "resolution": resolution,
             "method": method,
             "no_missing_residues": no_missing,
+            "ligands": ligands,
+            "ligand_status": ligand_status,
         })
 
     def _sort_key(x):
@@ -1555,7 +1555,7 @@ _DEFAULTS = dict(
     ligand_pdbqt=None, ligand_sdf=None, ligand_name="LIG",
     prot_smiles=None, ligand_done=False, ligand_log="",
     input_smiles_final="", ligand_charge=0, ligand_charge_method="rdkit_formal_charge",
-    ligand_charged_atoms=None, ligand_is_zwitterion=False, ligand_prep_mode="dimorphite",
+    ligand_charged_atoms=None, ligand_is_zwitterion=False, ligand_prep_mode="pkanet",
     output_pdbqt=None, output_sdf=None, output_pv_sdf=None, dock_base=None,
     docking_done=False, docking_log="", score_df=None, pose_mols=None,
     redock_done=False, redock_score=None, redock_result=None,
@@ -1629,28 +1629,71 @@ def _add_box_to_view(view, cx, cy, cz, sx, sy, sz):
         pass
 
 
-def _add_heme_to_view(view, rec_fh, model_idx):
+def _add_metals_heme_to_view(view, rec_fh, model_idx):
     """
-    Add heme atoms from rec_fh as orange sticks to an existing py3Dmol view.
-    Returns updated model_idx (incremented if heme was added).
+    Add metal ions AND heme atoms from rec_fh as coloured sticks to an
+    existing py3Dmol view.
+
+    Metal ions  → gold/yellow spheres  (colorscheme: Jmol)
+    Heme atoms  → orange sticks        (colorscheme: orangeCarbon)
+
+    Returns the updated model_idx (incremented once per group added).
     """
-    if rec_fh and os.path.exists(rec_fh):
-        _heme_lines = [
-            l for l in open(rec_fh)
-            if l[:6].strip() in ("ATOM", "HETATM")
-            and l[17:20].strip().upper() in _HEME_RESNAMES
-        ]
-        if _heme_lines:
-            view.addModel("".join(_heme_lines) + "END\n", "pdb")
+    from core import METAL_RESNAMES as _METAL_RN, HEME_RESNAMES as _HEME_RN
+
+    if not rec_fh or not os.path.exists(rec_fh):
+        return model_idx
+
+    try:
+        all_lines = open(rec_fh).readlines()
+    except Exception:
+        return model_idx
+
+    # ── Metal ions ────────────────────────────────────────────────────────
+    metal_lines = [
+        l for l in all_lines
+        if l[:6].strip() in ("ATOM", "HETATM")
+        and l[17:20].strip().upper() in _METAL_RN
+    ]
+    if metal_lines:
+        try:
+            view.addModel("".join(metal_lines) + "END\n", "pdb")
             view.setStyle({"model": model_idx}, {
-                "stick": {"colorscheme": "orangeCarbon", "radius": 0.25}
+                "sphere": {"colorscheme": "Jmol", "radius": 0.6},
             })
-            view.addLabel("HEM", {
-                "fontSize": 12, "fontColor": "orange",
-                "backgroundColor": "black", "backgroundOpacity": 0.5,
+            # Add a small label for each unique metal type found
+            metal_types = sorted({l[17:20].strip().upper() for l in metal_lines})
+            for mt in metal_types:
+                view.addLabel(mt, {
+                    "fontSize": 11, "fontColor": "gold",
+                    "backgroundColor": "black", "backgroundOpacity": 0.55,
+                    "inFront": True, "showBackground": True,
+                }, {"model": model_idx, "resn": mt})
+            model_idx += 1
+        except Exception:
+            pass   # viewer error — skip silently, don't crash
+
+    # ── Heme cofactor ─────────────────────────────────────────────────────
+    heme_lines = [
+        l for l in all_lines
+        if l[:6].strip() in ("ATOM", "HETATM")
+        and l[17:20].strip().upper() in _HEME_RN
+    ]
+    if heme_lines:
+        try:
+            view.addModel("".join(heme_lines) + "END\n", "pdb")
+            view.setStyle({"model": model_idx}, {
+                "stick": {"colorscheme": "orangeCarbon", "radius": 0.25},
+            })
+            view.addLabel("HEME", {
+                "fontSize": 11, "fontColor": "orange",
+                "backgroundColor": "black", "backgroundOpacity": 0.55,
                 "inFront": True, "showBackground": True,
             }, {"model": model_idx})
             model_idx += 1
+        except Exception:
+            pass
+
     return model_idx
 
 
@@ -1782,7 +1825,7 @@ def _render_binding_pocket_panel(
             if show_surface:
                 v.addSurface(py3Dmol.SAS, {"opacity": 0.55, "color": "white"}, {"model": mi})
             mi += 1
-        mi = _add_heme_to_view(v, heme_rec_fh or rec_fh, mi)
+        mi = _add_metals_heme_to_view(v, heme_rec_fh or rec_fh, mi)
         # Co-crystal only in normal app mode, never in figure panel
         if show_cryst and cryst_pdb and os.path.exists(cryst_pdb):
             v.addModel(open(cryst_pdb).read(), "pdb")
@@ -2718,7 +2761,7 @@ def _ready_figure_section(
             if show_surf:
                 v.addSurface(_py3d.SAS, {"opacity": 0.55, "color": "white"}, {"model": mi})
             mi += 1
-        mi = _add_heme_to_view(v, rec, mi)
+        mi = _add_metals_heme_to_view(v, rec, mi)
         v.addModel(_Chem_fig.MolToMolBlock(mol), "mol")
         lig_m = mi
         v.setStyle({"model": lig_m}, {"stick": {"colorscheme": "cyanCarbon", "radius": 0.30}})
@@ -2800,7 +2843,7 @@ def _ready_figure_section(
                     _vb.addModel(open(b_rec_fh).read(), "pdb")
                     _vb.setStyle({"model": _vbi}, {"cartoon": {"color": "spectrum", "opacity": 0.45}})
                     _vbi += 1
-                _vbi = _add_heme_to_view(_vb, b_rec_fh, _vbi)
+                _vbi = _add_metals_heme_to_view(_vb, b_rec_fh, _vbi)
                 if b_cryst_pdb and os.path.exists(b_cryst_pdb):
                     _vb.addModel(open(b_cryst_pdb).read(), "pdb")
                     _vb.setStyle({"model": _vbi}, {"stick": {"colorscheme": "magentaCarbon", "radius": 0.20}})
@@ -3429,6 +3472,27 @@ def _poseview_ui(
 
     # ── TAB 3: PoseView ───────────────────────────────────────────────────────
     with _tab_pv:
+        # ── PoseView charged-species warning ─────────────────────────────────
+        st.warning(
+            "⚠️ **PoseView Limitation — Charged Species Not Supported**\n\n"
+            "proteins.plus / PoseView does **not** support formally charged atoms "
+            "in the ligand. The diagram will always display the **neutral (protonated) "
+            "form** regardless of the ionisation state used during docking.\n\n"
+            "**Examples of affected ligands:**\n"
+            "- **Baicalein** at physiological pH: C6–O⁻ (phenoxide) is shown as C6–OH\n"
+            "- Carboxylate (–COO⁻) shown as –COOH\n"
+            "- Phosphate (–OPO₃²⁻) shown as neutral phosphoric acid\n"
+            "- Amine (–NH₃⁺) shown as –NH₂\n\n"
+            "**What this means:** hydrogen-bond donors/acceptors and ionic interactions "
+            "involving charged groups **may appear incorrect** in the PoseView diagram. "
+            "The docking itself (Vina score, 3D pose) is unaffected — only the 2D "
+            "depiction is misleading.\n\n"
+            "💡 For ligands with formal charges, use the **Anyone Can Dock 2D Diagram** "
+            "or **RDKit 2D Diagram** tabs instead — both honour the correct ionisation state.",
+            icon="⚠️",
+        )
+        # ─────────────────────────────────────────────────────────────────────
+
         _ci, _cb = st.columns([3, 1])
         with _ci:
             if _stale and st.session_state.get(img_svg_key):
@@ -3657,7 +3721,7 @@ def _receptor_section(pfx: str, wdir: Path, step_label: str):
         )
         if src == "Download from RCSB":
             with st.expander("🔎 Search protein / target in RCSB", expanded=False):
-                _qs_col, _qb_col = st.columns([5, 1])
+                _qs_col, _qb_col = st.columns([3.5, 1])
                 with _qs_col:
                     _rcsb_query = st.text_input(
                         "Search protein / keyword",
@@ -3721,8 +3785,9 @@ def _receptor_section(pfx: str, wdir: Path, step_label: str):
                             if h.get("no_missing_residues") is True
                             else ("missing?" if h.get("no_missing_residues") is None else "has missing")
                         )
+                        _lig = h.get("ligand_status") or "No ligand"
                         _name = h.get("protein_name") or h.get("title") or ""
-                        return f"{h['pdb_id']}  |  {_res}  |  {_miss}  |  {_name[:90]}"
+                        return f"{h['pdb_id']}  |  {_res}  |  {_miss}  |  Ligand: {_lig}  |  {_name[:70]}"
 
                     _labels = [_fmt_hit(h) for h in _hits]
                     _sel = st.selectbox(
@@ -3738,8 +3803,10 @@ def _receptor_section(pfx: str, wdir: Path, step_label: str):
                         if _picked.get("no_missing_residues") is True
                         else ("Missing residues unknown" if _picked.get("no_missing_residues") is None else "Has missing residues")
                     )
+                    _meta_ligand = _picked.get("ligand_status") or "No ligand"
                     st.caption(
-                        f"**{_picked['pdb_id']}** · {_meta_res} · {_picked.get('method') or 'method n/a'} · {_meta_missing}"
+                        f"**{_picked['pdb_id']}** · {_meta_res} · {_picked.get('method') or 'method n/a'} · "
+                        f"{_meta_missing} · Ligand: {_meta_ligand}"
                     )
                     if _picked.get("title"):
                         st.caption(_picked["title"])
@@ -3812,74 +3879,240 @@ def _receptor_section(pfx: str, wdir: Path, step_label: str):
                 "⚠️ If no ligand is found, grid defaults to protein centroid."
             ),
         )
-        if center_mode == "Auto-detect co-crystal ligand":
-            # ── Multi-ligand selector ─────────────────────────────────────
-            # Pre-scan the file for qualifying ligands so the user can pick
-            # which one to center the grid on before clicking Prepare.
-            # We only scan when a file is already on disk (download) or
-            # uploaded — skip if neither is ready yet.
+        # ── Receptor setup panel + HETATM action guide (combined) ────────
+        with st.expander("⚗️ Receptor setup panel", expanded=False):
+            st.caption(
+                "Select the co-crystal small molecule used to define the binding site. "
+                "The selected ligand is removed from the receptor but used to center the grid. "
+                "A dropdown is shown only when multiple plausible ligand candidates are present."
+            )
+
             _scan_path = None
-            if src == "Download from RCSB" and st.session_state.get(pfx + "pdb_token"):
-                _maybe = str(wdir / "raw_prefiltered.pdb")
-                if not os.path.exists(_maybe):
-                    _maybe = str(wdir / "raw.pdb")
-                if os.path.exists(_maybe):
-                    _scan_path = _maybe
+            if src == "Download from RCSB":
+                # Auto-download a lightweight raw structure for ligand scanning as soon as
+                # a valid PDB ID is available. No extra user click is required.
+                _token_scan = (pdb_id or "").strip().upper()
+                _fmt_scan = st.session_state.get(pfx + "rcsb_fmt", "PDB")
+                if len(_token_scan) == 4:
+                    _scan_ext = "cif" if _fmt_scan == "CIF" else "pdb"
+                    _scan_path_dl = str(wdir / f"raw_scan_{_token_scan}.{_scan_ext}")
+                    _scan_key = f"{_token_scan}_{_fmt_scan}"
+                    _cached_key = st.session_state.get(pfx + "ligand_scan_key", "")
+                    _cached_path = st.session_state.get(pfx + "ligand_scan_path", "")
+
+                    if (
+                        _cached_key == _scan_key
+                        and _cached_path
+                        and os.path.exists(_cached_path)
+                        and os.path.getsize(_cached_path) > 200
+                    ):
+                        _scan_path = _cached_path
+                    else:
+                        _url = f"https://files.rcsb.org/download/{_token_scan}.{_scan_ext}"
+                        with st.spinner(f"Scanning co-crystal ligands from RCSB entry {_token_scan}…"):
+                            rc, _ = _run_cmd(["curl", "-sf", _url, "-o", _scan_path_dl])
+
+                        # Some large/new structures may not be available as legacy PDB.
+                        # Fall back to CIF automatically for ligand scanning.
+                        if (
+                            (rc != 0 or not os.path.exists(_scan_path_dl) or os.path.getsize(_scan_path_dl) < 200)
+                            and _fmt_scan == "PDB"
+                        ):
+                            _scan_path_cif = str(wdir / f"raw_scan_{_token_scan}.cif")
+                            _url_cif = f"https://files.rcsb.org/download/{_token_scan}.cif"
+                            with st.spinner(f"PDB scan unavailable; trying CIF for {_token_scan}…"):
+                                rc2, _ = _run_cmd(["curl", "-sf", _url_cif, "-o", _scan_path_cif])
+                            if rc2 == 0 and os.path.exists(_scan_path_cif) and os.path.getsize(_scan_path_cif) > 200:
+                                _scan_path_dl = _scan_path_cif
+                                _scan_key = f"{_token_scan}_CIF"
+
+                        if os.path.exists(_scan_path_dl) and os.path.getsize(_scan_path_dl) > 200:
+                            _scan_path = _scan_path_dl
+                            st.session_state[pfx + "ligand_scan_key"] = _scan_key
+                            st.session_state[pfx + "ligand_scan_path"] = _scan_path_dl
+                            st.session_state[pfx + "pdb_token"] = _token_scan
+                        else:
+                            st.session_state[pfx + "ligand_scan_key"] = ""
+                            st.session_state[pfx + "ligand_scan_path"] = ""
             elif src != "Download from RCSB" and upload_file is not None:
-                _scan_path = str(wdir / "raw_upload_prescan.pdb")
-                if not os.path.exists(_scan_path):
-                    with open(_scan_path, "wb") as _sf:
-                        _sf.write(upload_file.getvalue() if hasattr(upload_file, "getvalue") else upload_file.read())
+                _up_ext = Path(upload_file.name).suffix.lower()
+                _scan_path = str(wdir / ("raw_upload_prescan.cif" if _up_ext in (".cif", ".mmcif") else "raw_upload_prescan.pdb"))
+                with open(_scan_path, "wb") as _sf:
+                    _sf.write(upload_file.getvalue() if hasattr(upload_file, "getvalue") else upload_file.read())
+
+            def _lig_label(_r):
+                _ch = _r.get("chain") or "—"
+                return f"{_r.get('resname')}  | chain {_ch} | resid {_r.get('resid')} | {_r.get('n_atoms')} atoms"
+
+            def _choose_ligand_candidates(_ligs):
+                """Return (candidate_rows, auto_selected_row, reason).
+
+                UI rule:
+                - one small molecule → no dropdown
+                - homo-multimer-like repeated same ligand across chains → use chain A only, no dropdown
+                - multiple ligands in chain A, or distinct ligands across chains/heteromer-like entries → dropdown
+                """
+                if not _ligs:
+                    return [], None, "no_ligand"
+                _chain_a = [r for r in _ligs if str(r.get("chain", "")).strip().upper() == "A"]
+                _resnames = {str(r.get("resname", "")).strip().upper() for r in _ligs}
+                _chains = [str(r.get("chain", "")).strip().upper() or "_" for r in _ligs]
+                _one_per_chain = all(_chains.count(c) == 1 for c in set(_chains))
+
+                if len(_ligs) == 1:
+                    return _ligs, _ligs[0], "single_ligand"
+
+                # Homo-multimer-like case: same ligand repeated in multiple chains.
+                # ACD uses the chain-A copy as the reference and strips all copies from docking receptor.
+                if len(_resnames) == 1 and len(_chain_a) == 1 and _one_per_chain:
+                    return _chain_a, _chain_a[0], "homo_multimer_chain_a"
+
+                # Several ligand-like residues in chain A: user should choose.
+                if len(_chain_a) > 1:
+                    return _chain_a, None, "multiple_chain_a_ligands"
+
+                # Heteromer-like or chemically distinct ligands across chains: user should choose.
+                if len(_ligs) > 1:
+                    return _ligs, None, "multiple_ligands"
+
+                return _ligs, _ligs[0], "fallback_single"
 
             if _scan_path and os.path.exists(_scan_path):
                 try:
-                    from core import scan_ligands as _scan_ligands
-                    _found_ligs = _scan_ligands(_scan_path)
-                    if len(_found_ligs) > 1:
-                        _lig_labels = [
-                            f"{d['resname']} (chain {d['chain'] or '—'}, "
-                            f"resid {d['resid']}, {d['n_atoms']} atoms)"
-                            for d in _found_ligs
-                        ]
-                        _sel_idx = st.selectbox(
-                            f"🔍 {len(_found_ligs)} ligands detected — select grid center:",
-                            options=range(len(_lig_labels)),
-                            format_func=lambda i: _lig_labels[i],
-                            key=pfx + "preferred_lig_idx",
-                        )
-                        st.session_state[pfx + "preferred_ligand"] = _found_ligs[_sel_idx]["resname"]
-                        st.caption(
-                            f"All {len(_found_ligs)} ligands will be removed from the receptor. "
-                            f"Grid will be centered on the selected one."
-                        )
-                    elif len(_found_ligs) == 1:
-                        st.session_state[pfx + "preferred_ligand"] = _found_ligs[0]["resname"]
-                    else:
-                        st.session_state[pfx + "preferred_ligand"] = ""
+                    _het_rows = scan_hetatm_residues(_scan_path)
                 except Exception:
-                    st.session_state.setdefault(pfx + "preferred_ligand", "")
-            # ─────────────────────────────────────────────────────────────
-        if center_mode == "Enter XYZ manually":
-            c1, c2, c3 = st.columns(3)
-            c1.number_input("X", value=0.0, key=pfx + "mx")
-            c2.number_input("Y", value=0.0, key=pfx + "my")
-            c3.number_input("Z", value=0.0, key=pfx + "mz")
-        elif center_mode == "Select by atom selection (ProDy)":
-            st.text_input(
-                "ProDy selection string",
-                value="resid 702 820 and chain A",
-                key=pfx + "mda_sel",
-                help=(
-                    "ProDy atom selection — the centroid of selected atoms becomes the box center.\n\n"
-                    "📖 Examples:\n"
-                    "   resid 702 and chain A\n"
-                    "   resname ATP and chain B\n"
-                    "⚙️ Use residue numbers from literature or binding site databases.\n"
-                    "⚠️ Chain IDs must match exactly — check your PDB file header."
-                ),
-            )
-            st.caption("💡 `resname LIG and chain A` · `resid 701 and chain A`")
+                    _het_rows = []
 
+                _lig_rows = [r for r in _het_rows if str(r.get("type_guess", "")).lower() == "ligand"]
+                _candidate_rows, _auto_row, _reason = _choose_ligand_candidates(_lig_rows)
+
+                _opt_col1, _opt_col2, _opt_col3 = st.columns(3)
+                with _opt_col1:
+                    _remove_water = st.checkbox(
+                        "Remove waters", value=True, key=pfx + "het_remove_water",
+                        help="Remove crystallographic water molecules from the docking receptor."
+                    )
+                with _opt_col2:
+                    _keep_metals = st.checkbox(
+                        "Keep metal ions", value=True, key=pfx + "het_keep_metals",
+                        help="Keep metal ions such as Zn, Mg, Fe, Cu in the receptor when present."
+                    )
+                with _opt_col3:
+                    _keep_cofactors = st.checkbox(
+                        "Keep cofactors", value=True, key=pfx + "het_keep_cofactors",
+                        help="Keep cofactors such as HEM, FAD, NAD unless you intentionally remove them."
+                    )
+
+                _selected_ref_key = ""
+                if _auto_row is not None:
+                    _selected_ref_key = str(_auto_row["key"])
+                    if _reason == "single_ligand":
+                        st.success(f"Auto-selected co-crystal ligand: **{_lig_label(_auto_row)}**")
+                    elif _reason == "homo_multimer_chain_a":
+                        st.success(
+                            "Homo-multimer-like repeated ligand detected. "
+                            f"ACD will use the chain-A copy: **{_lig_label(_auto_row)}**"
+                        )
+                    else:
+                        st.success(f"Auto-selected reference ligand: **{_lig_label(_auto_row)}**")
+                elif _candidate_rows:
+                    _labels = [_lig_label(r) for r in _candidate_rows]
+                    _idx = st.selectbox(
+                        "Co-crystal ligand for auto-detect binding site",
+                        options=list(range(len(_candidate_rows))),
+                        format_func=lambda i: _labels[i],
+                        key=pfx + "reference_ligand_dropdown",
+                        help=(
+                            "Only ligand-like HETATM residues are shown here. "
+                            "Buffers, water, metals, and common cofactors are handled by the options above."
+                        ),
+                    )
+                    _sel_row = _candidate_rows[int(_idx)]
+                    _selected_ref_key = str(_sel_row["key"])
+                    st.info(f"Grid center will use: **{_lig_label(_sel_row)}**")
+                else:
+                    st.warning(
+                        "No ligand-like HETATM candidate was detected. "
+                        "Auto-detect will fall back to the previous receptor-centroid behavior if no ligand is found."
+                    )
+
+                _policy = {}
+                for _r in _het_rows:
+                    _k = str(_r.get("key", ""))
+                    _tg = str(_r.get("type_guess", "")).lower()
+                    if not _k:
+                        continue
+                    if _k == _selected_ref_key:
+                        _policy[_k] = "reference"
+                    elif _tg == "ligand":
+                        # Other small molecules are removed by default to avoid accidental docking against a bound ligand copy.
+                        _policy[_k] = "remove"
+                    elif _tg == "water":
+                        _policy[_k] = "remove" if _remove_water else "keep"
+                    elif _tg == "metal":
+                        _policy[_k] = "keep" if _keep_metals else "remove"
+                    elif "cofactor" in _tg:
+                        _policy[_k] = "keep" if _keep_cofactors else "remove"
+                    else:
+                        # Buffers/additives/ions such as GOL, EDO, SO4, PO4 are removed by default.
+                        _policy[_k] = "remove"
+
+                st.session_state[pfx + "hetatm_policy"] = _policy
+                st.session_state[pfx + "reference_hetatm_key"] = _selected_ref_key
+
+                _keep_n = sum(1 for v in _policy.values() if v == "keep")
+                _remove_n = sum(1 for v in _policy.values() if v == "remove")
+                st.caption(
+                    f"Detected HETATM residues: {len(_het_rows)} total; "
+                    f"small-molecule candidates: {len(_lig_rows)}; keep: {_keep_n}; remove: {_remove_n}."
+                )
+            else:
+                if src == "Download from RCSB":
+                    _token_msg = (pdb_id or "").strip().upper()
+                    if len(_token_msg) == 4:
+                        st.warning(
+                            f"Could not automatically scan ligands for **{_token_msg}**. "
+                            "The receptor can still be prepared, but ligand auto-detection may fall back to the previous behavior."
+                        )
+                    else:
+                        st.info("Enter a 4-character PDB ID to automatically inspect co-crystal ligand candidates.")
+                else:
+                    st.info("Upload a PDB/CIF file to automatically inspect co-crystal ligand candidates.")
+                st.session_state.setdefault(pfx + "hetatm_policy", {})
+                st.session_state.setdefault(pfx + "reference_hetatm_key", "")
+            # ─────────────────────────────────────────────────────────────
+            if center_mode == "Enter XYZ manually":
+                c1, c2, c3 = st.columns(3)
+                c1.number_input("X", value=0.0, key=pfx + "mx")
+                c2.number_input("Y", value=0.0, key=pfx + "my")
+                c3.number_input("Z", value=0.0, key=pfx + "mz")
+            elif center_mode == "Select by atom selection (ProDy)":
+                st.text_input(
+                    "ProDy selection string",
+                    value="resid 702 820 and chain A",
+                    key=pfx + "mda_sel",
+                    help=(
+                        "ProDy atom selection — the centroid of selected atoms becomes the box center.\n\n"
+                        "📖 Examples:\n"
+                        "   resid 702 and chain A\n"
+                        "   resname ATP and chain B\n"
+                        "⚙️ Use residue numbers from literature or binding site databases.\n"
+                        "⚠️ Chain IDs must match exactly — check your PDB file header."
+                    ),
+                )
+                st.caption("💡 `resname LIG and chain A` · `resid 701 and chain A`")
+
+
+            st.markdown(
+                "---\n\n"
+                "**HETATM action guide**\n\n"
+                "- **reference**: use this co-crystal ligand to define the grid center, "
+                  "then remove it from the receptor.\n"
+                "- **keep**: retain the residue — catalytic metal, structural ion, "
+                  "heme/FAD/NAD cofactor, or conserved water.\n"
+                "- **remove**: strip buffer/solvent/additive molecules "
+                  "such as GOL, EDO, SO4, or irrelevant waters.\n"
+            )
     with col_b:
         st.markdown("**Search box size (Å)**")
         _box_help = (
@@ -3908,28 +4141,6 @@ def _receptor_section(pfx: str, wdir: Path, step_label: str):
     )
     if blind:
         st.caption("⚠️ Blind docking — box will cover entire protein extent.")
-
-    with st.expander("⚗️ Cofactor options", expanded=False):
-        keep_cofactors = st.checkbox(
-            "Keep cofactors in receptor", value=True, key=pfx + "keep_cofactors",
-            help="ATP, FAD, NAD, CoA, SAM, etc. Uncheck to dock into a cofactor-free pocket.",
-        )
-        keep_metals = st.checkbox(
-            "Keep metal ions in receptor", value=True, key=pfx + "keep_metals",
-            help="ZN, MG, CA, MN, FE, CU, etc. Uncheck to remove metals before docking.",
-        )
-        _strip_set = _COFACTOR_NAMES | _HEME_RESNAMES
-        from core import METAL_RESNAMES as _METAL_RESNAMES
-        _strip_sorted_cof   = ", ".join(sorted(_strip_set))
-        _strip_sorted_metal = ", ".join(sorted(_METAL_RESNAMES))
-        if keep_cofactors:
-            st.caption(f"✅ Cofactors **kept**: {_strip_sorted_cof}")
-        else:
-            st.caption(f"⚠️ Cofactors **stripped**: {_strip_sorted_cof}")
-        if keep_metals:
-            st.caption(f"✅ Metal ions **kept**: {_strip_sorted_metal}")
-        else:
-            st.caption(f"⚠️ Metal ions **stripped**: {_strip_sorted_metal}")
 
     if st.button("▶ Prepare Receptor", key=pfx + "btn_receptor", type="primary"):
 
@@ -4008,74 +4219,6 @@ def _receptor_section(pfx: str, wdir: Path, step_label: str):
         except Exception:
             pass
 
-        # ── Pre-filter cofactors / heme / metals ──────────────────────────
-        _keep        = st.session_state.get(pfx + "keep_cofactors", True)
-        _keep_metals = st.session_state.get(pfx + "keep_metals", True)
-        _cofactor_strip = _COFACTOR_NAMES if not _keep else set()
-
-        # Import metal resnames for optional stripping
-        try:
-            from core import METAL_RESNAMES as _MRNS
-        except ImportError:
-            _MRNS = {"MG","ZN","CA","MN","FE","CU","CO","NI","CD","HG","NA","K"}
-        _metal_strip = _MRNS if not _keep_metals else set()
-
-        _filtered_path = str(wdir / "raw_prefiltered.pdb")
-        _heme_lines    = []
-        _n_cofactor    = 0
-        _n_metal       = 0
-
-        with open(raw_path) as _fin, open(_filtered_path, "w") as _fout:
-            for _line in _fin:
-                _field = _line[:6].strip()
-                if _field in ("ATOM", "HETATM"):
-                    _rn = _line[17:20].strip().upper()
-                    if _rn in _HEME_RESNAMES:
-                        _heme_lines.append(_line)
-                        continue
-                    if _rn in _cofactor_strip:
-                        _n_cofactor += 1
-                        continue
-                    # Strip metals if user unchecked "Keep metal ions"
-                    # (they won't be re-injected → not scored by Vina)
-                    if _rn in _metal_strip:
-                        _n_metal += 1
-                        continue
-                _fout.write(_line)
-
-        raw_path = _filtered_path
-
-        # ── Compute heme center for auto-detect fallback ───────────────────
-        # If heme is the only notable feature (no drug-like ligand present),
-        # use the Fe atom (or heme centroid) as the auto-detected grid center.
-        _heme_center = None
-        if _heme_lines:
-            try:
-                _fe_lines = [l for l in _heme_lines
-                             if l[12:16].strip().upper() == "FE"]
-                _ref_lines = _fe_lines if _fe_lines else _heme_lines
-                _hxs = [float(l[30:38]) for l in _ref_lines]
-                _hys = [float(l[38:46]) for l in _ref_lines]
-                _hzs = [float(l[46:54]) for l in _ref_lines]
-                _heme_center = (
-                    sum(_hxs) / len(_hxs),
-                    sum(_hys) / len(_hys),
-                    sum(_hzs) / len(_hzs),
-                )
-            except Exception:
-                pass
-
-        if _heme_lines:
-            _heme_names = ", ".join(sorted({l[17:20].strip() for l in _heme_lines}))
-            st.info(
-                f"Heme ({_heme_names}, {len(_heme_lines)} atoms) stripped before "
-                f"OpenBabel — will be re-injected with AD4 atom types."
-            )
-        if _n_cofactor:
-            st.info(f"Stripped {_n_cofactor} cofactor atom(s) from receptor.")
-        if _n_metal:
-            st.info(f"Stripped {_n_metal} metal ion atom(s) from receptor (will not be re-injected).")
-
         _mode_map = {
             "Auto-detect co-crystal ligand":      "auto",
             "Enter XYZ manually":                 "manual",
@@ -4122,81 +4265,12 @@ def _receptor_section(pfx: str, wdir: Path, step_label: str):
                 prody_sel        = _prody_sel,
                 box_size         = (sx, sy, sz),
                 preferred_ligand = st.session_state.get(pfx + "preferred_ligand", ""),
+                hetatm_policy    = st.session_state.get(pfx + "hetatm_policy", {}),
+                reference_hetatm_key = st.session_state.get(pfx + "reference_hetatm_key", ""),
             )
 
         if result["success"]:
-            # ── Heme center fallback ────────────────────────────────────────
-            # If auto-detect found no drug-like ligand but heme was present,
-            # re-center the grid on the Fe atom (substrate binding site).
-            if (_core_mode == "auto"
-                    and not result.get("cocrystal_ligand_id")
-                    and _heme_center is not None):
-                from core import write_vina_config as _wvc, write_box_pdb as _wbp
-                _hcx, _hcy, _hcz = _heme_center
-                _wbp(result["box_pdb"],    _hcx, _hcy, _hcz, result["sx"], result["sy"], result["sz"])
-                _wvc(result["config_txt"], _hcx, _hcy, _hcz, result["sx"], result["sy"], result["sz"])
-                result["cx"] = _hcx; result["cy"] = _hcy; result["cz"] = _hcz
-                _fe_found = any(l[12:16].strip().upper() == "FE" for l in _heme_lines)
-                st.info(
-                    f"🧲 No co-crystal ligand found — grid auto-centered at "
-                    f"{'Fe' if _fe_found else 'heme centroid'} "
-                    f"({_hcx:.2f}, {_hcy:.2f}, {_hcz:.2f})"
-                )
-            # ── Re-inject heme ─────────────────────────────────────────────
-            _heme_log = []
-            if _heme_lines:
-                _AD4_TYPE = {"FE": "Fe", "N": "NA", "O": "OA", "C": "A", "S": "SA"}
-                _AD4_CHG  = {"FE": 2.0, "N": -0.4, "C": 0.1, "O": -0.4, "S": 0.0}
-                try:
-                    _pdbqt_path  = result["rec_pdbqt"]
-                    _pdbqt_lines = [
-                        l for l in open(_pdbqt_path).readlines()
-                        if l.strip() != "END"
-                    ]
-                    _injected = 0
-                    for _hl in _heme_lines:
-                        try:
-                            _serial  = int(_hl[6:11])
-                            _aname   = _hl[12:16].strip()
-                            _resname = _hl[17:20].strip().upper()
-                            _chain   = _hl[21] if len(_hl) > 21 else "A"
-                            _resid   = int(_hl[22:26])
-                            _x       = float(_hl[30:38])
-                            _y       = float(_hl[38:46])
-                            _z       = float(_hl[46:54])
-                            _el_raw  = (
-                                _hl[76:78].strip().upper()
-                                if len(_hl) > 76 and _hl[76:78].strip()
-                                else _aname[:2].strip().upper()
-                            )
-                            _el      = _el_raw.upper()
-                            _atype   = _AD4_TYPE.get(_el, "C")
-                            _charge  = _AD4_CHG.get(_el, 0.0)
-                            # Right-justify atom type in 2 chars for valid PDBQT
-                            _vina_type = f"{_atype:>2s}"
-                            _pdbqt_lines.append(
-                                f"HETATM{_serial:5d} {_aname:<4s} {_resname:<3s} "
-                                f"{_chain}{_resid:4d}    "
-                                f"{_x:8.3f}{_y:8.3f}{_z:8.3f}  1.00  0.00"
-                                f"    {_charge:+.3f} {_vina_type}\n"
-                            )
-                            _injected += 1
-                        except Exception as _he:
-                            _heme_log.append(f"  Could not re-inject heme line: {_he}")
-                    _pdbqt_lines.append("END\n")
-                    with open(_pdbqt_path, "w") as _pf:
-                        _pf.writelines(_pdbqt_lines)
-
-                    with open(result["rec_fh"], "a") as _rf:
-                        _rf.writelines(_heme_lines)
-
-                    _heme_log.append(
-                        f"Re-injected {_injected} heme atom(s) into PDBQT and rec.pdb"
-                    )
-                except Exception as _he2:
-                    _heme_log.append(f"Heme re-injection failed: {_he2}")
-
-            _full_log = result["log"] + _heme_log
+            _full_log = result["log"]
             st.session_state.update({
                 pfx + "receptor_fh":         result["rec_fh"],
                 pfx + "receptor_pdbqt":      result["rec_pdbqt"],
@@ -4290,7 +4364,7 @@ def _receptor_section(pfx: str, wdir: Path, step_label: str):
                 mi += 1
 
             # ── Heme cofactor ─────────────────────────────────────────────
-            mi = _add_heme_to_view(v3, st.session_state.get(pfx + "receptor_fh"), mi)
+            mi = _add_metals_heme_to_view(v3, st.session_state.get(pfx + "receptor_fh"), mi)
 
             _add_box_to_view(v3, cx_v, cy_v, cz_v, _sx, _sy, _sz)
             try:
@@ -4344,18 +4418,7 @@ if VINA_PATH is None:
     st.stop()
 
 if not _OBABEL_OK:
-    import platform as _plt
-    _os = _plt.system().lower()
-    _hint = {
-        "darwin":  "brew install open-babel",
-        "linux":   "sudo apt-get install openbabel  OR  conda install -c conda-forge openbabel",
-        "windows": "https://github.com/openbabel/openbabel/releases",
-    }.get(_os, "install openbabel")
-    st.error(
-        f"❌ OpenBabel not found.\n\n"
-        f"Install: `{_hint}`\n\n"
-        f"Then restart the app:  `streamlit run app.py`"
-    )
+    st.error("❌ OpenBabel not found. Add `openbabel` to packages.txt and redeploy.")
     st.stop()
 
 st.markdown(f"{_pill('Vina 1.2.7 ready', 'success')} ", unsafe_allow_html=True)
@@ -4477,7 +4540,7 @@ with tab_basic:
             help=(
                 "How to handle hydrogens for an uploaded structure file.\n\n"
                 "📖 Use uploaded form : keep all atoms exactly as in the file.\n"
-                "   Protonate at pH   : re-run Dimorphite-DL on extracted SMILES.\n"
+                "   Protonate at pH   : re-run pKaNET Cloud on extracted SMILES.\n"
                 "⚙️ 'As uploaded' if file is already correctly prepared.\n"
                 "   'At pH' if file is only a 3D template for coordinates.\n"
                 "⚠️ 'As uploaded' skips all protonation checks.\n"
@@ -4521,39 +4584,35 @@ with tab_basic:
             "⚠️ Wrong pH can shift net charge ±1 — large effect on docking affinity."
         ),
     )
-    st.caption("Default ligand preparation uses Dimorphite-DL at the target pH, then reports the RDKit formal charge of the final SMILES.")
+    st.caption("Ligand preparation uses pKaNET Cloud — tautomer-aware microstate ranking with 8-component HH scoring.")
 
     # ── Protonation mode ──────────────────────────────────────────────────────
     _prot_mode_ui = st.radio(
         "Protonation mode",
         [
-            "⚡ Fast (Dimorphite-DL)",
+            "🧪 pKaNET Cloud+",
             "🔬 Neutral (add H only)",
-            "🧬 pKaNET Cloud",
         ],
         horizontal=True,
         key="prot_mode",
         help=(
             "How to determine the ligand's protonation state at the target pH.\n\n"
-            "📖 ⚡ Fast       : Dimorphite-DL — fast, works offline, good for most drugs.\n"
-            "   🔬 Neutral    : keep input charge, just add H — use with pre-prepared files.\n"
-            "   🧬 pKaNET     : tautomer-aware microstate ranking, PubChem pKa evidence.\n"
-            "                   Best for polyphenols, flavonoids, zwitterions.\n"
-            "⚙️ Use pKaNET for natural products and complex ring systems.\n"
-            "⚠️ pKaNET may take 5–30 s per ligand (built-in algorithm, no extra file needed)."
+            "📖 🧪 pKaNET Cloud+ : tautomer-aware microstate ranking, PubChem pKa evidence.\n"
+            "                    Best for all drug-like molecules, polyphenols, zwitterions.\n"
+            "   🔬 Neutral      : keep input charge state, add H only — use with pre-prepared files.\n"
+            "⚠️ pKaNET requires pKaNET.py in the same folder as core.py."
         ),
     )
     _prot_mode_key = {
-        "⚡ Fast (Dimorphite-DL)": "dimorphite",
         "🔬 Neutral (add H only)": "neutral",
-        "🧬 pKaNET Cloud":         "pkanet",
-    }.get(_prot_mode_ui, "dimorphite")
+        "🧪 pKaNET Cloud+":         "pkanet",
+    }.get(_prot_mode_ui, "pkanet")
 
-    # pKaNET advanced options (shown only when pKaNET is selected)
-    _use_pubchem    = False
+    # pKaNET advanced options (always visible when pKaNET is selected, i.e. by default)
+    _use_pubchem    = True
     _pkanet_max_tau = 8
     _pkanet_ph_win  = 1.0
-    if _prot_mode_ui == "🧬 pKaNET Cloud":
+    if _prot_mode_ui == "🧪 pKaNET Cloud+":
         with st.expander("⚙️ pKaNET options", expanded=False):
             _use_pubchem    = st.checkbox(
                 "Query PubChem for experimental pKa",
@@ -4566,13 +4625,59 @@ with tab_basic:
             )
             _pkanet_ph_win  = st.slider(
                 "pH window", 0.2, 2.0, 1.0, 0.1, key="pkanet_ph_win",
-                help="Dimorphite-DL enumerates states in [pH − window/2, pH + window/2].",
+                help="pH window used during Dimorphite-DL enumeration inside pKaNET: [pH − window/2, pH + window/2].",
             )
-        st.info(
-            "🧬 pKaNET Cloud mode — tautomer enumeration + 8-component HH scoring. "
-            "Built-in algorithm, no extra files required. May take 5–30 s per ligand.",
-            icon="ℹ️",
-        )
+            _pkanet_sel_ui = st.radio(
+                "Microstate selection for docking",
+                [
+                    "Auto recommended (conservative when ambiguous)",
+                    "Highest-scoring microstate",
+                    "Manual rank",
+                ],
+                index=0,
+                key="pkanet_selection_ui",
+                help=(
+                    "Auto uses the pKaNET recommendation. For heuristic-only polyphenol/coumarin/flavonoid-like "
+                    "molecules, ACD may choose a conservative near-score state instead of the highest score."
+                ),
+            )
+            if _pkanet_sel_ui == "Manual rank":
+                _prev_rows = st.session_state.get("pkanet_ranked_microstates", []) or []
+                if _prev_rows:
+                    def _fmt_prev_microstate(_r):
+                        _rank = _r.get("microstate_rank", _r.get("rank", "?"))
+                        _chg  = _r.get("net_charge", _r.get("formal_charge", "?"))
+                        _score = _r.get("selection_score", _r.get("score", ""))
+                        _rec = _r.get("recommendation", "")
+                        _tag = " | recommended" if _r.get("recommended_default") else ""
+                        try:
+                            _score_txt = f" | score {_score:.3f}"
+                        except Exception:
+                            _score_txt = f" | score {_score}" if _score != "" else ""
+                        return f"Rank {_rank} | charge {_chg:+d}{_score_txt} | {_rec}{_tag}" if isinstance(_chg, int) else f"Rank {_rank} | charge {_chg}{_score_txt} | {_rec}{_tag}"
+
+                    _rank_options = [int(r.get("microstate_rank", r.get("rank", i + 1))) for i, r in enumerate(_prev_rows)]
+                    _current_rank = int(st.session_state.get("pkanet_manual_rank", 1) or 1)
+                    _default_idx = _rank_options.index(_current_rank) if _current_rank in _rank_options else 0
+                    _chosen_rank = st.selectbox(
+                        "Manual microstate rank to use",
+                        options=_rank_options,
+                        index=_default_idx,
+                        format_func=lambda rr: _fmt_prev_microstate(_prev_rows[_rank_options.index(rr)]),
+                        key="pkanet_manual_rank_dropdown",
+                        help="Choose from the ranked microstates from the previous preparation/preview, then click Prepare Ligand again.",
+                    )
+                    st.session_state["pkanet_manual_rank"] = int(_chosen_rank)
+                else:
+                    st.number_input(
+                        "Manual microstate rank to use",
+                        min_value=1, max_value=50, value=1, step=1,
+                        key="pkanet_manual_rank",
+                        help="After the first pKaNET run, ranked microstates will appear here as a dropdown.",
+                    )
+            st.caption(
+                "ACD will export `*_pkanet_ranked_microstates.csv` and `*_pkanet_decision_log.txt` with the prepared ligand."
+            )
     # ─────────────────────────────────────────────────────────────────────────
 
     if not st.session_state.receptor_done:
@@ -4589,19 +4694,28 @@ with tab_basic:
             "ligand_charge_method": "rdkit_formal_charge",
             "ligand_charged_atoms": [],
             "ligand_is_zwitterion": False,
-            "ligand_prep_mode": st.session_state.get("ligand_state_mode", "dimorphite"),
+            "ligand_prep_mode": st.session_state.get("ligand_state_mode", "pkanet"),
+            "pkanet_ranked_microstates": [],
+            "pkanet_ambiguous": False,
+            "pkanet_ranked_csv": "",
         })
         with st.spinner("Preparing ligand…"):
             _mode = st.session_state.get("lig_input_mode", "SMILES string")
-            # ✅ อ่านค่าจาก radio button ที่ผู้ใช้เลือก — ห้าม hardcode
+            # ✅ Use the actual radio selection — pKaNET is default
             _prot_mode_key = {
-                "⚡ Fast (Dimorphite-DL)": "dimorphite",
                 "🔬 Neutral (add H only)": "neutral",
-                "🧬 pKaNET Cloud":         "pkanet",
-            }.get(st.session_state.get("prot_mode", "⚡ Fast (Dimorphite-DL)"), "dimorphite")
-            _use_pubchem    = st.session_state.get("pkanet_use_pubchem", False)
+                "🧪 pKaNET Cloud+":         "pkanet",
+            }.get(st.session_state.get("prot_mode", "🧪 pKaNET Cloud+"), "pkanet")
+            _use_pubchem    = st.session_state.get("pkanet_use_pubchem", True)
             _pkanet_max_tau = st.session_state.get("pkanet_max_tau", 8)
             _pkanet_ph_win  = st.session_state.get("pkanet_ph_win", 1.0)
+            _pkanet_sel_ui  = st.session_state.get("pkanet_selection_ui", "Auto recommended (conservative when ambiguous)")
+            _pkanet_sel_key = {
+                "Auto recommended (conservative when ambiguous)": "auto_recommended",
+                "Highest-scoring microstate": "highest_score",
+                "Manual rank": "manual_rank",
+            }.get(_pkanet_sel_ui, "auto_recommended")
+            _pkanet_manual_rank = int(st.session_state.get("pkanet_manual_rank", 1) or 1)
 
             if "Upload" in _mode:
                 _sfobj = st.session_state.get("lig_struct_file")
@@ -4621,18 +4735,24 @@ with tab_basic:
                         st.error(f"❌ Could not read structure: {e}"); st.stop()
                     result = prepare_ligand(smiles_in, lig_name, ph_in, WORKDIR,
                                             mode=_prot_mode_key, use_pubchem=_use_pubchem,
-                                            max_tautomers=_pkanet_max_tau, ph_window=_pkanet_ph_win)
+                                            max_tautomers=_pkanet_max_tau, ph_window=_pkanet_ph_win,
+                                            pkanet_selection_mode=_pkanet_sel_key,
+                                            pkanet_manual_rank=_pkanet_manual_rank)
             elif "Ketcher" in _mode:
                 smiles_in = st.session_state.get("ketcher_smi", "").strip()
                 if not smiles_in:
                     st.error("No molecule drawn in Ketcher."); st.stop()
                 result = prepare_ligand(smiles_in, lig_name, ph_in, WORKDIR,
                                         mode=_prot_mode_key, use_pubchem=_use_pubchem,
-                                        max_tautomers=_pkanet_max_tau, ph_window=_pkanet_ph_win)
+                                        max_tautomers=_pkanet_max_tau, ph_window=_pkanet_ph_win,
+                                        pkanet_selection_mode=_pkanet_sel_key,
+                                        pkanet_manual_rank=_pkanet_manual_rank)
             else:
                 result = prepare_ligand(smiles_in, lig_name, ph_in, WORKDIR,
                                         mode=_prot_mode_key, use_pubchem=_use_pubchem,
-                                        max_tautomers=_pkanet_max_tau, ph_window=_pkanet_ph_win)
+                                        max_tautomers=_pkanet_max_tau, ph_window=_pkanet_ph_win,
+                                        pkanet_selection_mode=_pkanet_sel_key,
+                                        pkanet_manual_rank=_pkanet_manual_rank)
 
         if result["success"]:
             st.session_state.update({
@@ -4646,6 +4766,9 @@ with tab_basic:
                 "ligand_charged_atoms": result.get("charged_atoms", []),
                 "ligand_is_zwitterion": result.get("is_zwitterion", False),
                 "ligand_prep_mode":    result.get("protonation_mode", _prot_mode_key),
+                "pkanet_ranked_microstates": result.get("pkanet_ranked_microstates", []),
+                "pkanet_ambiguous":          result.get("pkanet_ambiguous", False),
+                "pkanet_ranked_csv":         result.get("pkanet_ranked_csv", ""),
                 "ligand_done":         True,
                 "ligand_log":          "\n".join(result["log"]),
             })
@@ -4668,16 +4791,94 @@ with tab_basic:
             f"{r['symbol']}{r['atom_idx']}({int(r['formal_charge']):+d})" for r in _charged_atoms_rows
         ) if _charged_atoms_rows else "none"
         st.markdown(
-            f"**Preparation mode:** `{st.session_state.get('ligand_prep_mode', 'dimorphite')}`  \n"
+            f"**Preparation mode:** `{st.session_state.get('ligand_prep_mode', 'pkanet')}`  \n"
             f"**Input SMILES:** `{st.session_state.get('input_smiles_final', '')}`  \n"
             f"**Final SMILES used for docking:** `{st.session_state.prot_smiles}`  \n"
             f"**Net formal charge:** `{int(st.session_state.get('ligand_charge', 0)):+d}`  \n"
             f"**Charged atoms:** `{_charged_atoms_txt}`  \n"
             f"**Zwitterion:** `{'YES' if st.session_state.get('ligand_is_zwitterion') else 'NO'}`"
         )
+        _rank_rows = st.session_state.get("pkanet_ranked_microstates", []) or []
+        if _rank_rows:
+            st.markdown("#### 🧪 pKaNET Cloud+ ranked microstates")
+
+            def _fmt_ranked_microstate(_r):
+                _rank = _r.get("microstate_rank", _r.get("rank", "?"))
+                _chg  = _r.get("net_charge", _r.get("formal_charge", "?"))
+                _score = _r.get("selection_score", _r.get("score", ""))
+                _delta = _r.get("delta_from_best", "")
+                _rec = _r.get("recommendation", "")
+                _tag = " | recommended" if _r.get("recommended_default") else ""
+                try:
+                    _score_txt = f" | score {_score:.3f}"
+                except Exception:
+                    _score_txt = f" | score {_score}" if _score != "" else ""
+                try:
+                    _delta_txt = f" | Δ {_delta:.3f}"
+                except Exception:
+                    _delta_txt = f" | Δ {_delta}" if _delta != "" else ""
+                try:
+                    _chg_txt = f"{int(_chg):+d}"
+                except Exception:
+                    _chg_txt = str(_chg)
+                return f"Rank {_rank} | charge {_chg_txt}{_score_txt}{_delta_txt} | {_rec}{_tag}"
+
+            _rank_options = list(range(len(_rank_rows)))
+            _recommended_idx = next((i for i, r in enumerate(_rank_rows) if r.get("recommended_default")), 0)
+            _selected_idx = st.selectbox(
+                "Select pKaNET microstate to inspect",
+                options=_rank_options,
+                index=_recommended_idx,
+                format_func=lambda i: _fmt_ranked_microstate(_rank_rows[i]),
+                key="pkanet_ranked_microstate_inspect_dropdown",
+                help="This dropdown replaces the full ranked table. To dock another microstate, choose Manual rank in pKaNET options and prepare the ligand again.",
+            )
+            _sel_row = _rank_rows[_selected_idx]
+            _sel_rank = int(_sel_row.get("microstate_rank", _sel_row.get("rank", _selected_idx + 1)))
+            st.session_state["pkanet_manual_rank"] = _sel_rank
+
+            _detail_cols = st.columns([1, 1, 1, 2])
+            with _detail_cols[0]:
+                st.metric("Rank", _sel_rank)
+            with _detail_cols[1]:
+                try:
+                    st.metric("Charge", f"{int(_sel_row.get('net_charge', _sel_row.get('formal_charge', 0))):+d}")
+                except Exception:
+                    st.metric("Charge", str(_sel_row.get("net_charge", _sel_row.get("formal_charge", "?"))))
+            with _detail_cols[2]:
+                _score_val = _sel_row.get("selection_score", _sel_row.get("score", ""))
+                try:
+                    st.metric("Score", f"{float(_score_val):.3f}")
+                except Exception:
+                    st.metric("Score", str(_score_val) if _score_val != "" else "—")
+            with _detail_cols[3]:
+                st.metric("Recommendation", str(_sel_row.get("recommendation", "—")))
+
+            _sel_smiles = _sel_row.get("microstate_smiles", _sel_row.get("smiles", ""))
+            if _sel_smiles:
+                st.markdown(f"**Selected microstate SMILES:** `{_sel_smiles}`")
+            # Keep detailed pKaNET diagnostic notes inside the Preparation log
+            # instead of showing extra text/warning blocks in the main ligand panel.
+            _pkanet_log_lines = []
+            _sel_reason = _sel_row.get("recommendation_reason", "")
+            if _sel_reason:
+                _pkanet_log_lines.append(f"pKaNET reason: {_sel_reason}")
+            _sel_atoms = _sel_row.get("charged_atoms", "")
+            if _sel_atoms:
+                _pkanet_log_lines.append(f"pKaNET charged atoms: {_sel_atoms}")
+            if st.session_state.get("pkanet_ambiguous"):
+                _pkanet_log_lines.append(
+                    "pKaNET warning: ambiguous protonation/tautomer assignment; "
+                    "ACD used the recommended state for docking. To dock a different state, "
+                    "select Manual rank above and prepare again."
+                )
+
         with st.expander("📋 Preparation log", expanded=False):
+            _log_html = st.session_state.ligand_log
+            if '_pkanet_log_lines' in locals() and _pkanet_log_lines:
+                _log_html = _log_html + "<br>" + "<br>".join(_pkanet_log_lines)
             st.markdown(
-                f'<div class="log-box">{st.session_state.ligand_log}</div>',
+                f'<div class="log-box">{_log_html}</div>',
                 unsafe_allow_html=True,
             )
 
@@ -4810,10 +5011,12 @@ with tab_basic:
             rd_smi = pts[0]
             rd_nm  = pts[1].replace(" ", "_") if len(pts) > 1 else "redock"
             ph_val = st.session_state.get("ph_in", 7.4)
-            _rd_prot_mode = st.session_state.get("prot_mode", "⚡ Fast (Dimorphite-DL)")
-            _rd_prot_mode = {"⚡ Fast (Dimorphite-DL)": "dimorphite",
-                              "🔬 Neutral (add H only)": "neutral"}.get(_rd_prot_mode, "dimorphite")
-            _rd_use_pubchem = False
+            _rd_prot_mode = st.session_state.get("prot_mode", "🧪 pKaNET Cloud+")
+            _rd_prot_mode = {
+                "🔬 Neutral (add H only)": "neutral",
+                "🧪 pKaNET Cloud+":         "pkanet",
+            }.get(_rd_prot_mode, "pkanet")
+            _rd_use_pubchem = st.session_state.get("pkanet_use_pubchem", True)
             _rd_max_tau = st.session_state.get("pkanet_max_tau", 8)
             _rd_ph_win  = st.session_state.get("pkanet_ph_win", 1.0)
             with st.spinner(f"Docking reference ligand ({rd_nm})…"):
@@ -5019,7 +5222,7 @@ with tab_basic:
                             _vrd.setStyle({"model": _mrd}, {"stick": {"colorscheme": "magentaCarbon", "radius": 0.2}})
                             _mrd += 1
                         # Heme
-                        _mrd = _add_heme_to_view(_vrd, st.session_state.get("receptor_fh"), _mrd)
+                        _mrd = _add_metals_heme_to_view(_vrd, st.session_state.get("receptor_fh"), _mrd)
                         _vrd.addModel(Chem.MolToMolBlock(_rd_mols[_rd_pose_i]), "mol")
                         _vrd.setStyle({"model": _mrd}, {"stick": {"colorscheme": "cyanCarbon", "radius": 0.28}})
                         _vrd.addSurface("SES", {"opacity": 0.2, "color": "lightblue"}, {"model": 0}, {"model": _mrd})
@@ -5097,7 +5300,7 @@ with tab_basic:
                 va.setStyle({"model": mai}, {"stick": {"colorscheme": "magentaCarbon", "radius": 0.22}})
                 mai += 1
             # ── Heme ──────────────────────────────────────────────────────
-            mai = _add_heme_to_view(va, st.session_state.get("receptor_fh"), mai)
+            mai = _add_metals_heme_to_view(va, st.session_state.get("receptor_fh"), mai)
             # ─────────────────────────────────────────────────────────────
             va.addModelsAsFrames(sdf_txt)
             va.setStyle({"model": mai}, {"stick": {"colorscheme": "greenCarbon", "radius": 0.25}})
@@ -5153,7 +5356,7 @@ with tab_basic:
                         v2.setStyle({"model": mi2}, {"stick": {"colorscheme": "magentaCarbon", "radius": 0.2}})
                         mi2 += 1
                     # ── Heme ──────────────────────────────────────────────
-                    mi2 = _add_heme_to_view(v2, st.session_state.get("receptor_fh"), mi2)
+                    mi2 = _add_metals_heme_to_view(v2, st.session_state.get("receptor_fh"), mi2)
                     # ─────────────────────────────────────────────────────
                     v2.addModel(Chem.MolToMolBlock(sel_mol), "mol")
                     v2.setStyle({"model": mi2}, {"stick": {"colorscheme": "cyanCarbon", "radius": 0.28}})
@@ -5224,7 +5427,7 @@ with tab_basic:
                 )
 
             try:
-                vbp = py3Dmol.view(width="100%", height=440)
+                vbp = py3Dmol.view(width="100%", height=640)
                 vbp.setBackgroundColor(_viewer_bg())
                 mbp = 0
                 if st.session_state.receptor_fh and os.path.exists(st.session_state.receptor_fh):
@@ -5234,7 +5437,7 @@ with tab_basic:
                         vbp.addSurface(py3Dmol.SAS, {"opacity": 0.55, "color": "white"}, {"model": mbp})
                     mbp += 1
                 # ── Heme ──────────────────────────────────────────────────
-                mbp = _add_heme_to_view(vbp, st.session_state.get("receptor_fh"), mbp)
+                mbp = _add_metals_heme_to_view(vbp, st.session_state.get("receptor_fh"), mbp)
                 # ─────────────────────────────────────────────────────────
                 vbp.addModel(Chem.MolToMolBlock(sel_mol), "mol")
                 _lig_m = mbp
@@ -5389,12 +5592,12 @@ with tab_batch:
                        "O=c1cc(-c2ccccc2)oc2cc(O)c(O)c(O)c12 Baicalein\n"
                        "O=c1cc(-c2ccc(O)c(O)c2)oc2cc(O)cc(O)c12 Luteolin\n"
                        "O=c1c(O)c(-c2ccc(O)cc2)oc2cc(O)cc(O)c12 Kaempferol\n"
-                       "COc1cc2c(cc1NC(=O)/C=C/CN(C)C)ncnc2Nc1ccc(F)c(Cl)c1 Osimertinib\n"
+                       "C=CC(=O)Nc1cc(Nc2nccc(-c3cn(C)c4ccccc34)n2)c(OC)cc1N(C)CCN(C)C Osimertinib\n"
                        "COc1cc2c(cc1OCCCN1CCOCC1)ncnc2Nc1ccc(F)c(Cl)c1 Gefitinib\n"
                        "CS(=O)(=O)CCNCc1ccc(-c2ccc3ncnc(Nc4ccc(OCc5cccc(F)c5)c(Cl)c4)c3c2)o1 Lapatinib\n"
-                       "CC1=CC=C(C=C1)NC2=NC=NC3=C2C=C(C=C3)Cl Afatinib\n"
-                       "C1=CC=C(C=C1)C2=CC(=O)C3=C(O2)C=C(C(=C3O)OC)O Galangin\n"
-                       "CC1=C(C=C(C=C1)NC2=NC=NC3=C2C=CC=C3)OC Imatinib"
+                       "CN(C)C/C=C/C(=O)Nc1cc2c(Nc3ccc(F)c(Cl)c3)ncnc2cc1O[C@H]1CCOC1 Afatinib\n"
+                       "O=c1c(O)c(-c2ccccc2)oc2cc(O)cc(O)c12 Galangin\n"
+                       "Cc1ccc(NC(=O)c2ccc(CN3CCN(C)CC3)cc2)cc1Nc1nccc(-c2cccnc2)n1 Imatinib"
                        ),
 
                 height=300, key="b_smiles_text")
@@ -5411,24 +5614,21 @@ with tab_batch:
         b_ph = st.number_input("Target pH", 0.0, 14.0, 7.4, 0.1, key="b_ph")
         _b_use_pubchem = False
 
-        # ── Protonation mode (same options as single-ligand tab) ─────────────
+        # ── Protonation mode ─────────────────────────────────────────────────
         _b_prot_mode_ui = st.radio(
             "Protonation mode",
-            ["🧪 Dimorphite-DL", "⚛️ Neutral (keep input)", "🧬 pKaNET Cloud"],
+            ["🧪 pKaNET Cloud+", "🔬 Neutral (keep input)"],
             horizontal=True,
             key="b_prot_mode_ui",
             help=(
-                "**Dimorphite-DL** — fast rule-based protonation.\n\n"
                 "**pKaNET Cloud** — full tautomer + microstate ranking "
-                "(recommended for polyphenols, nucleotides, charged ligands). "
-                "⚠️ ~5–30 s per ligand.\n\n"
-                "**Neutral** — use SMILES as-is."
+                "(recommended for all ligand types). ⚠️ ~5–30 s per ligand.\n\n"
+                "**Neutral** — use SMILES as-is, add H only."
             ),
         )
         _b_pkanet_max_tau = 8
         _b_pkanet_ph_win  = 1.0
-        if _b_prot_mode_ui == "🧬 pKaNET Cloud":
-            st.info("⚠️ pKaNET may take 5–30 s per ligand (built-in algorithm, no extra file needed).")
+        if _b_prot_mode_ui == "🧪 pKaNET Cloud+":
             _bc1, _bc2 = st.columns(2)
             with _bc1:
                 _b_pkanet_max_tau = st.slider("Max tautomers", 1, 20, 8, key="b_pkanet_max_tau")
@@ -5484,11 +5684,10 @@ with tab_batch:
         config    = st.session_state.get("b_config_txt")
         b_ph_val      = st.session_state.get("b_ph", 7.4)
         _b_prot_mode  = {
-            "🧪 Dimorphite-DL":          "dimorphite",
-            "⚛️ Neutral (keep input)":   "neutral",
-            "🧬 pKaNET Cloud":            "pkanet",
-        }.get(st.session_state.get("b_prot_mode_ui", "🧪 Dimorphite-DL"), "dimorphite")
-        _b_use_pubchem  = False
+            "🧪 pKaNET Cloud+":          "pkanet",
+            "🔬 Neutral (keep input)":  "neutral",
+        }.get(st.session_state.get("b_prot_mode_ui", "🧪 pKaNET Cloud+"), "pkanet")
+        _b_use_pubchem  = st.session_state.get("pkanet_use_pubchem", True)
         _b_pkanet_max_tau = st.session_state.get("b_pkanet_max_tau", 8)
         _b_pkanet_ph_win  = st.session_state.get("b_pkanet_ph_win", 1.0)
 
@@ -5715,7 +5914,7 @@ with tab_batch:
                             vb.setStyle({"model": bmi}, {"stick": {"colorscheme": "magentaCarbon", "radius": 0.2}})
                             bmi += 1
                         # Heme
-                        bmi = _add_heme_to_view(vb, st.session_state.get("b_receptor_fh"), bmi)
+                        bmi = _add_metals_heme_to_view(vb, st.session_state.get("b_receptor_fh"), bmi)
                         vb.addModel(Chem.MolToMolBlock(b_mols[b_pose_i]), "mol")
                         vb.setStyle({"model": bmi}, {"stick": {"colorscheme": "cyanCarbon", "radius": 0.28}})
                         vb.addSurface("SES", {"opacity": 0.2, "color": "lightblue"}, {"model": 0}, {"model": bmi})
