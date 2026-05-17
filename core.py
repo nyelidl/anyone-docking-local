@@ -897,7 +897,7 @@ def _find_flavone_A_ring_phenols(mol):
     Position-aware pKa assignment for chromone A-ring phenolic OHs.
 
     Classification (Fixes 1-4):
-      carbonyl_direct=True   -> flavone_3OH_flavonol   pKa  9.0  (FIX 3)
+      carbonyl_direct=True   -> flavone_3OH_flavonol   pKa  7.0  (FIX 3)
       carbonyl_direct=False  -> flavone_5OH_chelated   pKa 11.0  (FIX 1)
       ortho_to_ring_O        -> flavone_8OH            pKa  8.5
       n_ortho_phenols >= 2   -> flavone_6OH_pyrogallol pKa  8.5  (FIX 4a)
@@ -989,7 +989,7 @@ def _find_flavone_A_ring_phenols(mol):
 
         if ortho_to_carbonyl:
             if carbonyl_direct:
-                label, pka = "flavone_3OH_flavonol", 9.0    # FIX 3
+                label, pka = "flavone_3OH_flavonol", 7.0    # FIX 3 (quercetin 3-OH actual pKa ~7.0)
             else:
                 label, pka = "flavone_5OH_chelated", 11.0   # FIX 1
         elif ortho_to_ring_O:
@@ -999,7 +999,7 @@ def _find_flavone_A_ring_phenols(mol):
         elif n_ortho_phenols == 1:
             label, pka = "flavone_phenol_catechol_pair", 7.0   # FIX 4b
         else:
-            label, pka = "flavone_phenol_isolated", 7.0         # FIX 2
+            label, pka = "flavone_phenol_isolated", 8.5         # FIX 2 (apigenin 7-OH actual pKa ~8.7)
 
         sites.append({
             "label":         label,
