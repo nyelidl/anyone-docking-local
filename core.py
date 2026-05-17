@@ -995,7 +995,30 @@ _IONIZABLE_SITE_DEF = [
     ("tetrazole",          "c1nn[nH]n1",                                        4.9,  "acid"),
     ("imidazole_acid",     "c1cn[nH]c1",                                        6.0,  "acid"),
     ("benzimidazole",      "c1ccc2[nH]cnc2c1",                                 5.5,  "acid"),
-    ("sulfonamide_NH",     "[SX4](=O)(=O)[NX3;H1]",                           10.1,  "acid"),
+    # NEW: sulfonyl-imide N-H split into cyclic vs sulfonylurea contexts.
+    # (a) Cyclic (saccharin pKa=1.6, acesulfame-K pKa~2): N in ring with C=O and SO2.
+    # (b) Acyclic sulfonylurea (glipizide, glyburide pKa~5-6.5): Ar-SO2-NH-C(=O)-NHR.
+    # MUST precede sulfonamide_NH (first-match-wins).
+    ("sulfonyl_imide_NH_cyclic",   "[CX3;R](=O)[NX3;H1;R][SX4;R](=O)(=O)",     2.0,  "acid"),
+    ("sulfonylurea_NH",            "[NX3;H0,H1][CX3;!R](=O)[NX3;H1;!R][SX4;!R](=O)(=O)", 5.5,  "acid"),
+    ("sulfonyl_imide_NH",          "[CX3](=O)[NX3;H1][SX4](=O)(=O)",           2.0,  "acid"),
+    # NEW: Heteroaryl sulfonamide N-H (sulfa-antibiotics class) pKa ~5-7.
+    # Heterocycle inductively withdraws electron density and depresses pKa
+    # from ~10 (plain sulfonamide) to 5-7 — critical at pH 7.4 since this is
+    # the difference between predicting neutral vs anion.
+    # MUST precede sulfonamide_NH (first-match-wins).
+    ("sulfonamide_5het_NH","[SX4](=O)(=O)[NX3;H1][c;$([c]1[c,n][o,n,s][c,n][c,n]1),$([c]1[c,n][c,n][o,n,s][c,n]1)]",  5.7, "acid"),  # isoxazole etc (SMX pKa 5.6)
+    ("sulfonamide_thiazole_NH","[SX4](=O)(=O)[NX3;H1]c1nccs1",                  7.0,  "acid"),   # sulfathiazole pKa 7.1
+    ("sulfonamide_oxazole_NH", "[SX4](=O)(=O)[NX3;H1]c1ncco1",                  6.5,  "acid"),
+    ("sulfonamide_pyrim2_NH",  "[SX4](=O)(=O)[NX3;H1]c1ncccn1",                 6.5,  "acid"),   # sulfadiazine 6.5
+    ("sulfonamide_pyrim4_NH",  "[SX4](=O)(=O)[NX3;H1]c1ccncn1",                 6.5,  "acid"),
+    ("sulfonamide_pyrim5_NH",  "[SX4](=O)(=O)[NX3;H1]c1cncnc1",                 6.5,  "acid"),
+    ("sulfonamide_pyrazin_NH", "[SX4](=O)(=O)[NX3;H1]c1cnccn1",                 7.0,  "acid"),   # sulfadoxine 6.1
+    ("sulfonamide_pyridazin_NH","[SX4](=O)(=O)[NX3;H1]c1ccnnc1",                7.0,  "acid"),
+    ("sulfonamide_NH",     "[SX4](=O)(=O)[NX3;H1,H2]",                        10.1,  "acid"),
+    # Barbiturate ring N-H: pKa ~7.4 (phenobarbital). Two C=O flank N-H + third
+    # C=O on opposite side of 6-ring. MUST precede imide_NH.
+    ("barbiturate_NH",     "[NX3;H1;R]1[CX3;R](=O)[NX3;H1,H0;R][CX3;R](=O)[CX4;R][CX3;R]1=O", 7.4, "acid"),
     ("imide_NH",           "[CX3](=O)[NX3;H1][CX3]=O",                         9.6,  "acid"),
     ("acylhydrazone_NH",   "[CX3](=O)[NX3;H1][NX2]=[CX3]",                   10.5,  "acid"),
     ("hydrazide_NH",       "[CX3](=O)[NX3;H1][NX3;H2]",                       10.5,  "acid"),
