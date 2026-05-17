@@ -773,7 +773,7 @@ def _find_flavone_A_ring_phenols(mol):
         ortho_to_ring_O = ring_oxygen_idx is not None and ring_oxygen_idx in chromone_nbrs
         n_ortho_phenols = sum(1 for n in ortho_carbons if _has_phenolic_OH(n))
         if ortho_to_carbonyl:
-            label, pka = ("flavone_3OH_flavonol", 9.0) if carbonyl_direct else ("flavone_5OH_chelated", 11.0)
+            label, pka = ("flavone_3OH_flavonol", 7.0) if carbonyl_direct else ("flavone_5OH_chelated", 11.0)
         elif ortho_to_ring_O:
             label, pka = "flavone_8OH_ortho_pyranO", 8.5
         elif n_ortho_phenols >= 2:
@@ -781,7 +781,7 @@ def _find_flavone_A_ring_phenols(mol):
         elif n_ortho_phenols == 1:
             label, pka = "flavone_phenol_catechol_pair", 7.0  # ACD patch: match pKaNET Cloud CSV rank-1 anion at pH 7.4
         else:
-            label, pka = "flavone_phenol_isolated", 7.0  # ACD patch: match pKaNET Cloud CSV rank-1 anion at pH 7.4
+            label, pka = "flavone_phenol_isolated", 8.5  # ACD patch: match pKaNET Cloud CSV rank-1 anion at pH 7.4
         sites.append({"label": label, "atom_indices": [o_idx, c_idx], "heuristic_pka": pka, "site_type": "acid"})
     if sites:
         detail = ", ".join(f"{s['label'].replace('flavone_','')}(pKa={s['heuristic_pka']})" for s in sites)
