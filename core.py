@@ -1,22 +1,9 @@
 #!/usr/bin/env python3
 """
-core-local.py — Pure computation layer for Anyone Can Dock (local machine edition).
+core.py — Pure computation layer for Anyone Can Dock.
 No Streamlit imports. All functions return plain dicts / tuples.
-Safe to import in local scripts, pytest, or any UI framework.
+Safe to import in Colab notebooks, pytest, or any UI framework.
 
-Compatible with: macOS (Apple Silicon + Intel), Linux (x86_64), Windows (x86_64).
-
-Patch 2025-05: three PDB-parsing fixes for atoms like Br in 4S9 / partial-occupancy entries:
-  Fix A  _strip_anisou(text)         — remove ANISOU/SIGUIJ lines before ProDy / line-readers
-  Fix B  _keep_best_altloc(text)     — keep highest-occupancy alt-conf, blank altLoc column
-  Fix C  _atom_name_to_element()     — resolve "BR1" → "BR", "FE2" → "FE" etc.
-  Fix D  _clean_pdb_text(text)       — convenience wrapper calling A+B
-  Fix E  _clean_pdb_file(path)       — read/clean/write cleaned copy; returns cleaned path
-
-These are applied in:
-  scan_hetatm_residues()      — before parsePDB (Fix A+B) and in line-reader (Fix C)
-  prepare_receptor()          — before parsePDB (Fix A+B)
-  strip_and_convert_receptor()— in the HETATM line-reader (Fix C) and before obabel (Fix A+B)
 """
 
 import os
@@ -25,16 +12,11 @@ import subprocess
 import sys
 import tempfile
 import time
-import re as _re
 from pathlib import Path
 
-# ── Platform helpers ──────────────────────────────────────────────────────────
-_SYS    = _platform.system().lower()          # "linux" | "darwin" | "windows"
+_SYS = _platform.system().lower()
 _IS_WIN = _SYS == "windows"
-_IS_MAC = _SYS == "darwin"
-_IS_LIN = _SYS == "linux"
-# Shell null-redirect token — safe to embed in f-string shell commands.
-_NULL   = "2>NUL" if _IS_WIN else "2>/dev/null"
+_NULL = "2>NUL" if _IS_WIN else "2>/dev/null"
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  CONSTANTS
@@ -68,7 +50,7 @@ COFACTOR_NAMES = {
     "GOL", "PEG", "EDO", "MPD", "PGE", "PG4",
     "SO4", "PO4", "SUL", "PHO",
     "IHP", "TTP", "CTP", "UTP",
-    "COA", "SAM", "SAH",
+    #"COA", "SAM", "SAH",
     "EPE", "MES", "TRS", "ACT", "ACY",
     "HO", "LA", "CE", "PR", "ND", "PM", "SM", "EU", "GD", "TB", "DY", "ER", "TM", "YB", "LU",
 }
@@ -81,8 +63,8 @@ HEME_RESNAMES = {"HEM", "HEC", "HEA", "HEB", "HDD", "HDM"}
 # Treat them as co-crystal *reference* ligands for grid-box centering: removed
 # from the receptor and used to center the box, not kept as passive cofactors.
 #
-# NOTE: several of these (ATP, ADP, AMP, GTP, GDP, GMP, SAM, SAH) also
-# appear in COFACTOR_NAMES. Because _guess_hetatm_type checks this set BEFORE
+# NOTE: several of these (ATP, ADP, AMP, GTP, GDP, GMP) also appear in
+# COFACTOR_NAMES. Because _guess_hetatm_type checks this set BEFORE
 # COFACTOR_NAMES, and _collect_removable_ligands subtracts this set from its
 # exclusion list, membership here wins and they are classified as "ligand".
 REFERENCE_LIGAND_COFACTORS = {
@@ -102,174 +84,6 @@ REFERENCE_LIGAND_COFACTORS = {
 _PV_MAX_RETRIES = 3
 _PV_RETRY_DELAY = 10
 _PV_POLL_ATTEMPTS = 60
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  PDB CLEANING HELPERS  (Patch 2025-05 — Fixes A–E)
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _strip_anisou(pdb_text: str) -> str:
-    """
-    Fix A — Remove ANISOU and SIGUIJ records.
-
-    These anisotropic B-factor lines immediately follow the ATOM/HETATM they
-    belong to.  ProDy (some builds) and any line-by-line reader that advances
-    one record at a time can land on the ANISOU line and either miscount
-    atoms or silently drop the preceding HETATM.
-
-    Example entry that triggered the bug:
-        HETATM 7319 BR1  4S9 A1101  86.832 121.044  17.730  0.80 30.83  BR
-        ANISOU 7319 BR1  4S9 A1101   3962   3965   3786   344    90   -56  BR
-
-    Stripping ANISOU/SIGUIJ is safe — they carry no coordinate information.
-    """
-    out = []
-    for line in pdb_text.splitlines(keepends=True):
-        rec = line[:6]   # deliberately NOT .strip() — exact column check
-        if rec in ("ANISOU", "SIGUIJ"):
-            continue
-        out.append(line)
-    return "".join(out)
-
-
-def _keep_best_altloc(pdb_text: str) -> str:
-    """
-    Fix B — Resolve alternate conformations.
-
-    Keep the highest-occupancy alt-loc for each atom; blank the altLoc column
-    (column 17, 0-indexed 16) so downstream tools see a normal single-conformer
-    file.
-
-    Example: BR1 at altLoc A / occ 0.80  +  altLoc B / occ 0.20
-    Result:  BR1 with blank altLoc and occ 0.80 — no longer dropped.
-
-    Without this fix, tools that skip non-blank or non-'A' altLoc atoms (e.g.
-    Meeko, some ProDy selectors, obabel) silently lose the atom.
-    """
-    from collections import defaultdict
-
-    lines = pdb_text.splitlines(keepends=True)
-
-    # First pass: for each unique (chain, resseq, icode, atom-name) key that
-    # has alt-loc variants, find the line index of the best conformer.
-    # Key layout (all from fixed PDB columns):
-    #   chain  = col 22   (0-indexed 21)
-    #   resseq = cols 23-26 stripped
-    #   icode  = col 27   (0-indexed 26)
-    #   name   = cols 13-16
-    best: dict = defaultdict(lambda: (" ", -1.0, -1))
-    for i, line in enumerate(lines):
-        rec = line[:6].strip()
-        if rec not in ("ATOM", "HETATM") or len(line) < 27:
-            continue
-        altloc = line[16]
-        if altloc == " ":
-            continue  # no alt-conf — always kept; no tracking needed
-        try:
-            occ = float(line[54:60])
-        except (ValueError, IndexError):
-            occ = 0.0
-        key = (
-            line[21] if len(line) > 21 else " ",   # chain
-            line[22:26].strip(),                     # resseq
-            line[26] if len(line) > 26 else " ",    # icode
-            line[12:16],                             # atom name (4 chars)
-        )
-        if occ > best[key][1]:
-            best[key] = (altloc, occ, i)
-
-    if not best:
-        return pdb_text  # nothing to resolve — return unchanged
-
-    keep_indices = {v[2] for v in best.values()}
-
-    out = []
-    for i, line in enumerate(lines):
-        rec = line[:6].strip()
-        if rec in ("ATOM", "HETATM") and len(line) > 16 and line[16] != " ":
-            key = (
-                line[21] if len(line) > 21 else " ",
-                line[22:26].strip(),
-                line[26] if len(line) > 26 else " ",
-                line[12:16],
-            )
-            if i not in keep_indices:
-                continue  # drop lower-occupancy conformer
-            # Blank altLoc column so downstream tools treat it as normal
-            line = line[:16] + " " + line[17:]
-        out.append(line)
-    return "".join(out)
-
-
-def _atom_name_to_element(atom_name: str, element_col: str = "") -> str:
-    """
-    Fix C — Derive a 1–2 char element symbol from a PDB atom name field
-    (cols 13–16) and the optional element column (cols 77–78).
-
-    Handles non-standard names that include serial digits, e.g.:
-      "BR1 " → "BR"      " FE2" → "FE"      " C  " → "C"
-      "ZN1 " → "ZN"      "CL1 " → "CL"      "NA1 " → "NA"
-
-    Priority: explicit element column > two-letter lookup > first letter.
-    """
-    # Prefer the explicit element column when present and purely alphabetic
-    el = element_col.strip().upper()
-    if el and el.isalpha():
-        return el
-
-    # Strip digits and whitespace, then take leading letters
-    name = atom_name.strip().upper()
-    letters = _re.sub(r"[^A-Z]", "", name)
-
-    # Known two-letter elements that commonly appear as HETATM / metal ions
-    TWO_LETTER = {
-        "BR", "CL", "FE", "ZN", "MG", "CA", "MN", "CU", "CO",
-        "NI", "CD", "HG", "SE", "NA", "AL", "SI", "AU", "AG",
-        "RU", "RH", "PD", "PT", "IR", "OS", "RE", "MO", "TC",
-        "SN", "PB", "BI", "SB", "TE", "AS", "GE", "GA", "IN",
-        "TL", "BA", "SR", "CS", "RB", "LI", "BE", "SC", "TI",
-        "CR", "YB", "LU", "TM", "ER", "DY", "TB", "GD",
-        "EU", "SM", "PM", "ND", "PR", "CE", "LA",
-    }
-    if len(letters) >= 2 and letters[:2] in TWO_LETTER:
-        return letters[:2]
-    return letters[:1] if letters else "X"
-
-
-def _clean_pdb_text(pdb_text: str) -> str:
-    """
-    Fix D — Apply Fix A + Fix B in sequence.
-    Safe to call on any PDB string (no-op on CIF).
-    """
-    pdb_text = _strip_anisou(pdb_text)
-    pdb_text = _keep_best_altloc(pdb_text)
-    return pdb_text
-
-
-def _clean_pdb_file(path: str) -> str:
-    """
-    Fix E — Read a PDB file, apply _clean_pdb_text, write a '_cleaned.pdb'
-    copy alongside the original, and return the cleaned path.
-
-    Returns the original path unchanged on any error or if the file is CIF.
-    The cleaned file is idempotent — calling twice produces the same result.
-    """
-    try:
-        # Skip CIF files — _clean_pdb_text is PDB-specific
-        if is_cif_file(path):
-            return path
-        raw = open(path).read()
-        cleaned = _clean_pdb_text(raw)
-        if cleaned == raw:
-            return path  # nothing changed; avoid extra write
-        out_path = _re.sub(r"\.(pdb|ent)$", "_cleaned.pdb", path, flags=_re.IGNORECASE)
-        if out_path == path:
-            out_path = path + "_cleaned.pdb"
-        with open(out_path, "w") as fh:
-            fh.write(cleaned)
-        return out_path
-    except Exception:
-        return path  # graceful degradation
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -399,7 +213,7 @@ def is_cif_file(filepath: str) -> bool:
 def check_obabel():
     import shutil
     if shutil.which("obabel") is None:
-        return False, "obabel not found — install OpenBabel (https://openbabel.org) and ensure it is on PATH"
+        return False, "obabel not found — install OpenBabel and ensure it is on PATH"
     _, out = run_cmd("obabel --version")
     return True, (out.splitlines()[0] if out else "ok")
 
@@ -410,7 +224,6 @@ def check_obabel():
 
 def get_vina_binary(path: str = ""):
     import shutil as _shutil
-    # ── Check if vina is already on PATH (common for local installs) ──────
     _vina_in_path = _shutil.which("vina") or _shutil.which("vina_1.2.7") or _shutil.which("AutoDock-Vina")
     if _vina_in_path and os.path.getsize(_vina_in_path) > 100_000:
         return _vina_in_path, f"ok (found on PATH: {_vina_in_path})"
@@ -487,7 +300,7 @@ def _guess_hetatm_type(resname, n_atoms):
     if rn in HEME_RESNAMES:
         return "heme/cofactor"
     # ATP/SAM/SAH-like: grid-defining ligand, not a passive cofactor.
-    # MUST precede COFACTOR_NAMES (ATP/ADP/GTP/SAM/SAH also live in that set).
+    # MUST precede COFACTOR_NAMES (ATP/ADP/GTP/... also live in that set).
     if rn in REFERENCE_LIGAND_COFACTORS:
         return "ligand"
     if rn in COFACTOR_NAMES:
@@ -500,6 +313,7 @@ def _guess_hetatm_type(resname, n_atoms):
 
 
 def _default_hetatm_action(type_guess, n_atoms):
+    # reference = use for grid center and remove from receptor; keep = retain in receptor; remove = strip
     if type_guess == "water":
         return "remove"
     if type_guess == "metal":
@@ -535,8 +349,10 @@ def _collect_hetatm_residues(atoms) -> list:
             "action": _default_hetatm_action(tg, n_atoms),
             "sel_str": sel, "atoms": res_atoms, "cx": cx_, "cy": cy_, "cz": cz_,
         })
+    # Ligand candidates first, then cofactors/metals/buffers/waters
     rank = {"ligand": 0, "heme/cofactor": 1, "cofactor": 2, "metal": 3, "buffer/ion": 4, "other": 5, "water": 6}
     rows.sort(key=lambda d: (rank.get(d["type_guess"], 9), -d["n_atoms"], d["resname"], d["chain"], d["resid"]))
+    # Only the largest ligand should be auto reference by default; other ligand-like HETATMs default to remove.
     seen_reference = False
     for d in rows:
         if d["type_guess"] == "ligand":
@@ -549,12 +365,7 @@ def _collect_hetatm_residues(atoms) -> list:
 
 
 def scan_hetatm_residues(raw_pdb: str) -> list:
-    """
-    Return HETATM residues for receptor setup UI.
-
-    FIX A+B applied: PDB text is cleaned (ANISOU stripped, best altloc kept)
-    before ProDy parses it, so partial-occupancy atoms like BR1 at occ=0.80
-    are correctly detected rather than silently dropped.
+    """Return HETATM residues for receptor setup UI.
 
     action options:
       reference = use as co-crystal reference/grid center and remove from receptor
@@ -564,22 +375,13 @@ def scan_hetatm_residues(raw_pdb: str) -> list:
     try:
         from prody import parsePDB, confProDy
         confProDy(verbosity="none")
-
-        # ── Fix A+B: clean before ProDy sees the file ──────────────────────
-        _working_path = raw_pdb
-        if not is_cif_file(raw_pdb):
-            _working_path = _clean_pdb_file(raw_pdb)
-
-        if is_cif_file(_working_path):
+        if is_cif_file(raw_pdb):
             import tempfile as _tf
             _tmp = _tf.mktemp(suffix=".pdb")
-            res = convert_cif_to_pdb(_working_path, _tmp)
+            res = convert_cif_to_pdb(raw_pdb, _tmp)
             if res["success"]:
-                _working_path = _tmp
-                # Clean the converted PDB too
-                _working_path = _clean_pdb_file(_working_path)
-
-        atoms = parsePDB(_working_path)
+                raw_pdb = _tmp
+        atoms = parsePDB(raw_pdb)
         if atoms is None:
             return []
         rows = _collect_hetatm_residues(atoms)
@@ -662,15 +464,12 @@ def scan_ligands(raw_pdb: str) -> list:
     try:
         from prody import parsePDB, confProDy
         confProDy(verbosity="none")
-        # Fix A+B
-        if not is_cif_file(raw_pdb):
-            raw_pdb = _clean_pdb_file(raw_pdb)
         if is_cif_file(raw_pdb):
             import tempfile as _tf
             _tmp = _tf.mktemp(suffix=".pdb")
             res  = convert_cif_to_pdb(raw_pdb, _tmp)
             if res["success"]:
-                raw_pdb = _clean_pdb_file(_tmp)
+                raw_pdb = _tmp
         atoms = parsePDB(raw_pdb)
         if atoms is None:
             return []
@@ -685,57 +484,21 @@ def scan_ligands(raw_pdb: str) -> list:
 
 
 def strip_and_convert_receptor(rec_raw: str, wdir) -> dict:
-    """
-    Convert a cleaned receptor PDB to rec.pdb + rec.pdbqt.
-
-    Fix A+B: the input file is cleaned before obabel so partial-occupancy
-             atoms (e.g. BR1 at occ=0.80) are not silently dropped.
-    Fix C:   _atom_name_to_element() is used when identifying metal/heme atoms
-             in the line-by-line reader, so "BR1", "FE2", "ZN1" etc. are all
-             correctly categorised regardless of how RCSB names them.
-    """
     wdir = Path(wdir)
     log  = []
     rec_fh    = str(wdir / "rec.pdb")
     rec_pdbqt = str(wdir / "rec.pdbqt")
     try:
-        # ── Fix A+B: clean before any line-reader or obabel call ───────────
-        try:
-            raw_text = open(rec_raw).read()
-            cleaned_text = _clean_pdb_text(raw_text)
-            if cleaned_text != raw_text:
-                rec_raw_clean = rec_raw.replace(".pdb", "_cleaned.pdb")
-                if rec_raw_clean == rec_raw:
-                    rec_raw_clean = rec_raw + "_cleaned.pdb"
-                with open(rec_raw_clean, "w") as _fh:
-                    _fh.write(cleaned_text)
-                rec_raw = rec_raw_clean
-                log.append("✓ PDB cleaned (ANISOU stripped, best alt-loc kept)")
-        except Exception as _ce:
-            log.append(f"⚠ PDB pre-clean skipped: {_ce}")
-
         metal_lines = []
         heme_lines  = []
         clean_lines = []
-
         with open(rec_raw) as f:
             for line in f:
                 field = line[:6].strip()
-                if field not in ("ATOM", "HETATM"):
-                    clean_lines.append(line)
-                    continue
-
-                # Fix C: use robust element resolution instead of raw slice
-                atom_name_raw = line[12:16] if len(line) > 15 else "    "
-                element_col   = line[76:78] if len(line) > 78 else ""
-                el = _atom_name_to_element(atom_name_raw, element_col)
-
-                # Resname is still in cols 17-20 (reliable for classification)
-                rn = line[17:20].strip().upper()
-
-                if rn in METAL_RESNAMES or el in METAL_RESNAMES:
+                rn    = line[17:20].strip().upper()
+                if field in ("ATOM", "HETATM") and rn in METAL_RESNAMES:
                     metal_lines.append(line)
-                elif rn in HEME_RESNAMES:
+                elif field in ("ATOM", "HETATM") and rn in HEME_RESNAMES:
                     heme_lines.append(line)
                 else:
                     clean_lines.append(line)
@@ -761,10 +524,25 @@ def strip_and_convert_receptor(rec_raw: str, wdir) -> dict:
             raise ValueError(f"PDBQT conversion produced empty file (exit {rc2}). Output: {out2[:400]}")
         log.append("✓ PDBQT conversion complete")
 
+        # Open Babel 3.2 may emit COMPND/AUTHOR headers that Vina 1.2.7
+        # rejects as unknown receptor tags. Keep only rigid-receptor records.
+        with open(rec_pdbqt) as f:
+            pdbqt_lines = [
+                line for line in f
+                if line[:6].strip() in ("ATOM", "HETATM", "TER", "END")
+            ]
+        with open(rec_pdbqt, "w") as f:
+            f.writelines(pdbqt_lines)
+        log.append("✓ Removed non-PDBQT Open Babel headers (Vina-safe)")
+
         # ── Re-add metals + heme to rec.pdb for display / PoseView ──────────
+        # This is done AFTER PDBQT generation so the docking PDBQT still uses
+        # the dedicated re-injection logic below (with proper AD4 atom types).
+        # We ALWAYS attempt this, regardless of whether PDBQT re-injection works.
         if metal_lines or heme_lines:
             try:
                 rec_lines = open(rec_fh).readlines()
+                # Remove any trailing END record so we can append cleanly
                 rec_lines = [l for l in rec_lines if l.strip() != "END"]
                 rec_lines.extend(metal_lines)
                 rec_lines.extend(heme_lines)
@@ -792,6 +570,7 @@ def strip_and_convert_receptor(rec_raw: str, wdir) -> dict:
                 "GD", "TB", "DY", "ER", "TM", "YB", "LU",
             }
 
+            # Metal atoms
             for ml in metal_lines:
                 try:
                     resname = ml[17:20].strip().upper()
@@ -817,6 +596,7 @@ def strip_and_convert_receptor(rec_raw: str, wdir) -> dict:
                 except Exception as e:
                     log.append(f"⚠ Could not re-inject metal line: {e}")
 
+            # Heme atoms — assign AD4 atom types
             for hl in heme_lines:
                 try:
                     serial  = int(hl[6:11])
@@ -834,7 +614,7 @@ def strip_and_convert_receptor(rec_raw: str, wdir) -> dict:
                         atype  = "NA"
                         charge = -0.3
                     elif name.upper().startswith("C"):
-                        atype  = "A"
+                        atype  = "A"   # aromatic carbon
                         charge = 0.0
                     else:
                         atype  = "C"
@@ -869,7 +649,6 @@ def strip_and_convert_receptor(rec_raw: str, wdir) -> dict:
     except Exception as e:
         log.append(f"ERROR: {e}")
         return {"success": False, "error": str(e), "log": log}
-
 
 def write_box_pdb(filename: str, cx, cy, cz, sx, sy, sz):
     hx, hy, hz = sx / 2, sy / 2, sz / 2
@@ -911,7 +690,7 @@ def prepare_receptor(
     center_mode: str = "auto",
     manual_xyz: tuple = (0.0, 0.0, 0.0),
     prody_sel: str = "",
-    box_size: tuple = (16, 16, 16),
+    box_size: tuple = (18, 18, 18),
     preferred_ligand: str = "",
     hetatm_policy: dict | None = None,
     reference_hetatm_key: str = "",
@@ -930,10 +709,6 @@ def prepare_receptor(
                 raise ValueError(f"CIF -> PDB conversion failed: {cif_result.get('error', 'unknown')}")
             raw_pdb = converted_pdb
 
-        # ── Fix A+B: clean before ProDy ───────────────────────────────────
-        raw_pdb = _clean_pdb_file(raw_pdb)
-        log.append("✓ PDB pre-cleaned (ANISOU stripped, best alt-loc resolved)")
-
         atoms = parsePDB(raw_pdb)
         if atoms is None:
             raise ValueError("ProDy parsePDB returned None")
@@ -943,6 +718,10 @@ def prepare_receptor(
         cocrystal_ligand_id = ""
         cx = cy = cz = 0.0
 
+        # HETATM-aware receptor setup. The UI can pass per-residue actions:
+        #   reference = use as grid-center reference and remove from receptor
+        #   keep      = keep in receptor
+        #   remove    = strip from receptor
         _hetatm_rows = _collect_hetatm_residues(atoms)
         _policy = {str(k): str(v).lower() for k, v in (hetatm_policy or {}).items()}
         for _r in _hetatm_rows:
@@ -954,6 +733,7 @@ def prepare_receptor(
         if _reference is None:
             _reference = next((d for d in _hetatm_rows if d.get("action") == "reference"), None)
 
+        # Backward compatibility: if no HETATM policy is provided, old preferred_ligand behavior still works.
         _all_ligs = _collect_removable_ligands(atoms)
         _primary = None
         if _reference is not None:
@@ -1100,9 +880,12 @@ def prepare_receptor(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  PKANET CLOUD  (unchanged from original)
+#  PKANET CLOUD — ionizable site table + HH scoring helpers
+#  Ported from pKaNET Cloud notebook (Hengphasatporn et al. 2026)
+#  Full replacement with all 12 fixes — see file header for details.
 # ══════════════════════════════════════════════════════════════════════════════
 
+# Weights matching real pKaNET Cloud notebook
 _W_AROM_RING_LOST         = 8.0
 _W_PHENOL_TO_KETO_FLIP    = 6.0
 _W_PYROGALLOL_TRIKETO     = 6.0
@@ -1111,8 +894,10 @@ _W_PHENOL_PRESERVED_BONUS = 0.5
 _TAUTOMER_PLAUSIBILITY_CUTOFF = 3.0
 _AMBIGUITY_SCORE_GAP          = 0.5
 
+# ── Chromone system detection ─────────────────────────────────────────────────
 
 def _detect_chromone_system(mol):
+    """Return atom indices of the fused chromen-4-one system."""
     from rdkit import Chem
     ring_info = mol.GetRingInfo()
     rings = [set(r) for r in ring_info.AtomRings() if len(r) == 6]
@@ -1151,7 +936,20 @@ def _detect_chromone_system(mol):
     return system
 
 
+# ── FIX 1-4: Flavonoid A-ring phenol detection ───────────────────────────────
+
 def _find_flavone_A_ring_phenols(mol):
+    """
+    Position-aware pKa assignment for chromone A-ring phenolic OHs.
+
+    Classification (Fixes 1-4):
+      carbonyl_direct=True   -> flavone_3OH_flavonol   pKa  7.0  (FIX 3)
+      carbonyl_direct=False  -> flavone_5OH_chelated   pKa 11.0  (FIX 1)
+      ortho_to_ring_O        -> flavone_8OH            pKa  8.5
+      n_ortho_phenols >= 2   -> flavone_6OH_pyrogallol pKa  8.5  (FIX 4a)
+      n_ortho_phenols == 1   -> flavone_catechol_pair  pKa  7.0  (FIX 4b)
+      else                   -> flavone_isolated       pKa  7.0  (FIX 2)
+    """
     chromone_atoms = _detect_chromone_system(mol)
     if not chromone_atoms:
         return []
@@ -1214,13 +1012,16 @@ def _find_flavone_A_ring_phenols(mol):
         ortho_carbons = [n for n in chromone_nbrs
                          if mol.GetAtomWithIdx(n).GetSymbol() == "C"]
 
+        # FIX 1 + FIX 3: direct bond vs peri path to C4=O
         ortho_to_carbonyl = False
         carbonyl_direct   = False
         if ring_carbonyl_idx is not None:
             if ring_carbonyl_idx in chromone_nbrs:
+                # Direct bond C3-C4=O -> flavonol 3-OH (FIX 3)
                 ortho_to_carbonyl = True
                 carbonyl_direct   = True
             else:
+                # Peri path C5-C4a-C4=O -> flavone 5-OH (FIX 1)
                 for nb in chromone_nbrs:
                     if any(n.GetIdx() == ring_carbonyl_idx
                            for n in mol.GetAtomWithIdx(nb).GetNeighbors()):
@@ -1234,17 +1035,17 @@ def _find_flavone_A_ring_phenols(mol):
 
         if ortho_to_carbonyl:
             if carbonyl_direct:
-                label, pka = "flavone_3OH_flavonol", 7.0
+                label, pka = "flavone_3OH_flavonol", 7.0    # FIX 3 (quercetin 3-OH actual pKa ~7.0)
             else:
-                label, pka = "flavone_5OH_chelated", 11.0
+                label, pka = "flavone_5OH_chelated", 11.0   # FIX 1
         elif ortho_to_ring_O:
             label, pka = "flavone_8OH_ortho_pyranO", 8.5
         elif n_ortho_phenols >= 2:
-            label, pka = "flavone_6OH_pyrogallol_center", 8.5
+            label, pka = "flavone_6OH_pyrogallol_center", 8.5  # FIX 4a
         elif n_ortho_phenols == 1:
-            label, pka = "flavone_phenol_catechol_pair", 7.0
+            label, pka = "flavone_phenol_catechol_pair", 7.0   # FIX 4b
         else:
-            label, pka = "flavone_phenol_isolated", 8.5
+            label, pka = "flavone_phenol_isolated", 8.5         # FIX 2 (apigenin 7-OH actual pKa ~8.7)
 
         sites.append({
             "label":         label,
@@ -1264,16 +1065,26 @@ def _find_flavone_A_ring_phenols(mol):
     return sites
 
 
+# ── Ionizable site SMARTS table ───────────────────────────────────────────────
+
 _IONIZABLE_SITE_DEF = [
     ("sulfonic_acid",      "[SX4](=O)(=O)[OX2H1]",                             1.0,  "acid"),
-    ("phosphate_diester",  "[PX4](=O)([OX2H1])([OX2,OX1-])[OX2,OX1-]",       2.1,  "acid"),
-    ("phosphonate",       "[PX4](=O)([OX2H1])[OX2H1]",                         2.1,  "acid"),
+    ("phosphate_diester",  "[PX4](=O)([OX2H1])([OX2,OX1-])[OX2,OX1-]",       2.1,  "acid"),  # alpha/beta/gamma-P (1 OH)
+    ("phosphonate",       "[PX4](=O)([OX2H1])[OX2H1]",                         2.1,  "acid"),  # gamma-P (2 OH)
     ("carboxylic_acid",    "[CX3](=O)[OX2H1]",                                 4.5,  "acid"),
     ("tetrazole",          "c1nn[nH]n1",                                        4.9,  "acid"),
+    # imidazole_acid removed: pKa 6.0 is the BASE (imidazolium) pKa, not N-H acid pKa
+    # (~14). Treating it as acid caused false deprotonation at pH 7.4. The
+    # protonatable ring N is already captured by pyridine_like (pKa=5.2, base).
+    # benzimidazole: pKa 5.5 is also the BASE pKa (ring N protonation), not N-H acid
+    # (~13). Changed to base so it is correctly neutral at pH 7.4 (e.g. omeprazole).
     ("benzimidazole",      "c1ccc2[nH]cnc2c1",                                 5.5,  "base"),
+    # ── N-H acids (patched 2026-05): heteroaryl sulfonamides + barbiturate ──
+    # NEW: sulfonyl-imide N-H split into cyclic vs sulfonylurea contexts.
     ("sulfonyl_imide_NH_cyclic",   "[CX3;R](=O)[NX3;H1;R][SX4;R](=O)(=O)",       2.0,  "acid"),
     ("sulfonylurea_NH",            "[NX3;H0,H1][CX3;!R](=O)[NX3;H1;!R][SX4;!R](=O)(=O)", 5.5,  "acid"),
     ("sulfonyl_imide_NH",          "[CX3](=O)[NX3;H1][SX4](=O)(=O)",             2.0,  "acid"),
+    # Heteroaryl sulfonamide N-H (sulfa-antibiotics) pKa ~5-7 — MUST precede sulfonamide_NH
     ("sulfonamide_5het_NH",        "[SX4](=O)(=O)[NX3;H1][c;$([c]1[c,n][o,n,s][c,n][c,n]1),$([c]1[c,n][c,n][o,n,s][c,n]1)]",  5.7, "acid"),
     ("sulfonamide_thiazole_NH",    "[SX4](=O)(=O)[NX3;H1]c1nccs1",               7.0,  "acid"),
     ("sulfonamide_oxazole_NH",     "[SX4](=O)(=O)[NX3;H1]c1ncco1",               6.5,  "acid"),
@@ -1282,8 +1093,11 @@ _IONIZABLE_SITE_DEF = [
     ("sulfonamide_pyrim5_NH",      "[SX4](=O)(=O)[NX3;H1]c1cncnc1",              6.5,  "acid"),
     ("sulfonamide_pyrazin_NH",     "[SX4](=O)(=O)[NX3;H1]c1cnccn1",              7.0,  "acid"),
     ("sulfonamide_pyridazin_NH",   "[SX4](=O)(=O)[NX3;H1]c1ccnnc1",              7.0,  "acid"),
+    # 1,2,4-thiadiazol-5-yl: sulfamethizole pKa 5.45
     ("sulfonamide_thiadiazole_NH", "[SX4](=O)(=O)[NX3;H1]c1nncs1",               5.5,  "acid"),
+    # Generic sulfonamide: H1,H2 to catch both secondary AND primary (-SO2-NH2)
     ("sulfonamide_NH",             "[SX4](=O)(=O)[NX3;H1,H2]",                  10.1,  "acid"),
+    # Barbiturate ring N-H: pKa ~7.4 (phenobarbital). MUST precede imide_NH.
     ("barbiturate_NH",             "[NX3;H1;R]1[CX3;R](=O)[NX3;H1,H0;R][CX3;R](=O)[CX4;R][CX3;R]1=O", 7.4, "acid"),
     ("imide_NH",                   "[CX3](=O)[NX3;H1][CX3]=O",                   9.6,  "acid"),
     ("acylhydrazone_NH",   "[CX3](=O)[NX3;H1][NX2]=[CX3]",                   10.5,  "acid"),
@@ -1303,11 +1117,13 @@ _IONIZABLE_SITE_DEF = [
     ("morpholine_N",       "[NX3;H0;R;$(N1CC[O,S]CC1)]",                       4.9,  "base"),
     ("piperazine_NH",      "[NX3;H1;R;$(N1CCNCC1)]",                           8.1,  "base"),
     ("piperazine_N_sub",   "[NX3;H0;R;$(N1CCNCC1)]",                           3.5,  "base"),
+    # amidine and guanidine MUST precede aliphatic_amine (GROUP_SITE_LABELS claim all N atoms).
     ("amidine",            "[CX3](=[NX2;H0,H1])[NX3;H1,H2;"
                            "!$([NX3][CX3](=[NX2])[NX3])]",                    12.4,  "base"),
     ("guanidine",          "[NX3][CX3](=[NX2;!$(N~C#N)])[NX3]",               12.5,  "base"),
+    ("amine_gamma_ring_sulfonyl",  "[NX3;H1,H2;!$(NC=O);!$([nH])][CX4;R][CX4;R][CX4;R][SX4;R](=O)(=O)", 6.5, "base"),
     ("aliphatic_amine",    "[NX3;H1,H2;!$(NC=O);!$(N~[!#6;!H]);!$([nH]);"
-                           "!$(Nc);!$([NX3][CX3](=[NX2])])",                  9.5,  "base"),
+                           "!$(Nc);!$([NX3][CX3](=[NX2]))]",                  9.5,  "base"),
     ("aliphatic_amine_t",  "[NX3;H0;!$(NC=O);!$(Nc);!$([nH]);!$([N]~[!#6]);"
                            "!$([N;R]1CC[O,S]CC1);!$([N;R]1CCNCC1)]",          9.0,  "base"),
 ]
@@ -1325,11 +1141,20 @@ def _compile_ionizable_sites():
 _IONIZABLE_SITES_COMPILED = _compile_ionizable_sites()
 
 
+# ── FIX 5: find_ionizable_sites with claimed_atoms ───────────────────────────
+
 def _find_ionizable_sites(mol):
+    """
+    FIX 5: claimed_atoms prevents SMARTS pass from overwriting A-ring OHs.
+
+    Pass 1: flavonoid A-ring phenols (claim atoms -> block Pass 2).
+    Pass 2: SMARTS table, first-match-wins per ionizable atom.
+    """
     sites         = []
     seen_ion      = set()
     claimed_atoms = set()
 
+    # Pass 1 — flavone A-ring (highest priority)
     for site in _find_flavone_A_ring_phenols(mol):
         ion_idx = site["ionizable_idx"]
         if ion_idx in seen_ion:
@@ -1338,6 +1163,16 @@ def _find_ionizable_sites(mol):
         claimed_atoms.update(site["atom_indices"])
         sites.append(site)
 
+    # Pass 2 — generic SMARTS table (per-atom dedup)
+    # Each ionizable atom (O/S/N with H) in a match becomes its own site.
+    # This correctly handles multi-OH groups (e.g. gamma-phosphate in ATP/ADP)
+    # where a single SMARTS match covers 2 ionizable oxygens.
+    #
+    # GROUP_SITES: entries that represent a resonance-delocalized ionization
+    # event spanning multiple N atoms (guanidine, amidine). After one site is
+    # recorded, ALL nitrogen atoms in the match are added to seen_ion so that
+    # aliphatic_amine cannot claim the remaining NH/NH2 atoms in the same group
+    # and produce spurious extra charges (e.g. arginine +3 instead of +1).
     _GROUP_SITE_LABELS = frozenset({"guanidine", "amidine"})
 
     for lbl, pat, pka, stype in _IONIZABLE_SITES_COMPILED:
@@ -1361,14 +1196,19 @@ def _find_ionizable_sites(mol):
                     "heuristic_pka": pka,
                     "site_type":     stype,
                 })
+                # For group sites (guanidine/amidine), record only the first
+                # ionizable atom as the site, then claim all remaining N atoms
+                # in the match so they cannot be re-fired by aliphatic_amine.
                 if lbl in _GROUP_SITE_LABELS:
                     for other_idx in match:
                         if (other_idx != ion_idx
                                 and mol.GetAtomWithIdx(other_idx).GetAtomicNum() == 7):
                             seen_ion.add(other_idx)
-                    break
+                    break  # only one site per guanidine/amidine group
     return sites
 
+
+# ── FIX 6: HH scoring with dpH-scaled formula ────────────────────────────────
 
 def _hh_fraction_charged(pka, ph, site_type):
     if site_type == "acid":
@@ -1377,6 +1217,7 @@ def _hh_fraction_charged(pka, ph, site_type):
 
 
 def _hh_match_score(pka, ph, site_type, actual_charge):
+    """FIX 6: Real pKaNET Cloud formula — dpH-scaled with decisive multiplier."""
     f_charged = _hh_fraction_charged(pka, ph, site_type)
     dpH       = abs(ph - pka)
     decisive  = (f_charged >= 0.65) or (f_charged <= 0.35)
@@ -1403,6 +1244,8 @@ def _hh_match_score(pka, ph, site_type, actual_charge):
         else:
             return -min(1.5, dpH * 0.45 * pen_mul) - 0.15
 
+
+# ── FIX 7: Tautomer plausibility with aromaticity guards ─────────────────────
 
 _CHEM_BONUS_DEF = [
     ("amide",            +2.5, "[CX3](=O)[NX3;H1,H2]"),
@@ -1458,6 +1301,7 @@ def _count_phenolic_OH(mol):
 
 
 def _score_tautomer(smiles, ref_mol=None):
+    """FIX 7: Aromaticity-loss and phenol-flip penalties vs ref_mol."""
     from rdkit import Chem
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
@@ -1477,12 +1321,27 @@ def _score_tautomer(smiles, ref_mol=None):
     return total
 
 
+# ── FIX 8: Full 8-component microstate scoring ───────────────────────────────
+
 def _score_microstate(smiles, ph, taut_score, pubchem, ref_mol=None, ion_sites=None):
+    """
+    FIX 8: Full 8-component scoring matching real pKaNET Cloud:
+      s1 amide-N deprotonation safety
+      s2 aromaticity loss vs ref_mol
+      s3 tautomer plausibility (weighted)
+      s4 HH pH-consistency per ionizable site
+      s5 PubChem evidence bonus
+      s6 zwitterion consistency
+      s7 improbable neutral penalty
+      s8 multicharge penalty
+    """
     from rdkit import Chem
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         return -1e9
 
+    # ion_sites must come from ref_mol (the original input SMILES), NOT from
+    # the microstate mol which has [O-] atoms (Hs=0) that break site detection.
     if ion_sites is None:
         ion_sites = _find_ionizable_sites(ref_mol if ref_mol is not None else mol)
     fc_map    = {a.GetIdx(): int(a.GetFormalCharge()) for a in mol.GetAtoms()}
@@ -1490,17 +1349,21 @@ def _score_microstate(smiles, ph, taut_score, pubchem, ref_mol=None, ion_sites=N
     n_pos     = sum(1 for v in fc_map.values() if v > 0)
     n_neg     = sum(1 for v in fc_map.values() if v < 0)
 
+    # s1: amide-N deprotonation safety
     pat_bad = Chem.MolFromSmarts("[$([NX3-]C=O),$([NX3-]c=O)]")
     s1 = -5.0 * len(mol.GetSubstructMatches(pat_bad)) if pat_bad else 0.0
 
+    # s2: aromaticity loss vs ref_mol
     s2 = 0.0
     if ref_mol is not None:
         rings_lost = max(0, _n_aromatic_rings(ref_mol) - _n_aromatic_rings(mol))
         if rings_lost > 0:
             s2 = -_W_AROM_RING_LOST * rings_lost
 
+    # s3: tautomer plausibility
     s3 = 0.65 * taut_score
 
+    # s4: HH pH-consistency for each ionizable site
     s4 = 0.0
     for site in ion_sites:
         pka = site["heuristic_pka"]
@@ -1511,6 +1374,7 @@ def _score_microstate(smiles, ph, taut_score, pubchem, ref_mol=None, ion_sites=N
         site_charge = sum(fc_map.get(i, 0) for i in site["atom_indices"])
         s4 += _hh_match_score(pka, ph, site["site_type"], site_charge)
 
+    # s5: PubChem evidence bonus
     s5 = 0.0
     if pubchem.get("available"):
         w = {"high": 1.0, "medium": 0.6, "low": 0.2}.get(
@@ -1520,6 +1384,7 @@ def _score_microstate(smiles, ph, taut_score, pubchem, ref_mol=None, ion_sites=N
             s5 += 0.25 * w if net == exp else -0.15 * w
         s5 = max(-0.4, min(0.5, s5))
 
+    # s6: zwitterion consistency
     has_acid = any(s["site_type"] == "acid"
                    and (ph - s["heuristic_pka"]) > 1.0 for s in ion_sites)
     has_base = any(s["site_type"] == "base"
@@ -1530,6 +1395,7 @@ def _score_microstate(smiles, ph, taut_score, pubchem, ref_mol=None, ion_sites=N
     else:
         s6 = -0.4 if (has_acid and has_base and net == 0 and n_pos == 0) else 0.0
 
+    # s7: improbable neutral penalty
     strong_acid   = [s for s in ion_sites if s["site_type"] == "acid"
                      and (ph - s["heuristic_pka"]) > 2.0]
     strong_base   = [s for s in ion_sites if s["site_type"] == "base"
@@ -1548,12 +1414,16 @@ def _score_microstate(smiles, ph, taut_score, pubchem, ref_mol=None, ion_sites=N
     if probable_base and net <= 0 and n_pos == 0:
         s7 -= 0.35 * len(probable_base)
 
+    # s8: multicharge penalty
     s8 = -0.12 * max(0, n_pos + n_neg - 2)
 
     return s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8
 
 
+# ── FIX 9: Manual deprotonation ──────────────────────────────────────────────
+
 def _manual_deprotonate_site(smiles, site):
+    """FIX 9: Manually ionize a specific site. Returns new SMILES or None."""
     from rdkit import Chem
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
@@ -1592,7 +1462,14 @@ def _manual_deprotonate_site(smiles, site):
         return None
 
 
+# ── FIX 10: Supplement Dimorphite with missed ionizable sites ─────────────────
+
 def _supplement_dimorphite(tautomer_smiles, dimorphite_results, ion_sites, target_ph):
+    """
+    FIX 10: For each ionizable site Dimorphite missed, force-generate
+    the ionized variant. Critical for flavonoid A-ring OHs which
+    Dimorphite's internal SMARTS table does not cover.
+    """
     supplemented = list(dimorphite_results)
     existing     = set(dimorphite_results)
     for site in ion_sites:
@@ -1609,16 +1486,18 @@ def _supplement_dimorphite(tautomer_smiles, dimorphite_results, ion_sites, targe
     return supplemented
 
 
-# ── PubChem pKa lookup ────────────────────────────────────────────────────────
-# Delegated to pkanet-cloud.py's `pubchem_lookup`, loaded via
-# `_load_local_pkanet_module` and called at protonate_pkanet Stage B (below).
-# The canonical implementation provides persistent two-level caching
-# (cid:{ik} + diss:{cid}), evidence-graded confidence (temperature/solvent/
-# site-label/vague/conflicting flags), a third regex fallback for loose prose
-# forms, and a richer return dict (cid, inchikey, source_texts, flags, error).
-# A local re-implementation was removed to prevent accidental use of a weaker
-# duplicate.
+# ── PubChem lookup ────────────────────────────────────────────────────────────
+# NOTE: PubChem pKa retrieval is delegated to pkanet-cloud.py's `pubchem_lookup`,
+# loaded via `_load_local_pkanet_module` and used at protonate_pkanet Stage B
+# (see line ~1810 below). The canonical implementation is preferred because it
+# offers persistent two-level caching (cid:{ik} + diss:{cid}), evidence-graded
+# confidence (temperature/solvent/site-label/vague/conflicting flags), a third
+# regex fallback for loose prose forms, and a richer return dict
+# (cid, inchikey, source_texts, flags, error). A local re-implementation was
+# removed to prevent accidental use of a weaker duplicate.
 
+
+# ── FIX 11: generate_ranked_microstates (full pipeline) ──────────────────────
 
 def _generate_ranked_microstates(
     base_smiles,
@@ -1627,6 +1506,11 @@ def _generate_ranked_microstates(
     max_tautomers=8,
     pubchem=None,
 ):
+    """
+    FIX 11: Full pKaNET Cloud microstate ranking pipeline.
+    Returns list of dicts sorted by selection_score descending.
+    Each dict: microstate_smiles, net_charge, selection_score
+    """
     from rdkit import Chem
     from rdkit.Chem.MolStandardize import rdMolStandardize
 
@@ -1637,6 +1521,7 @@ def _generate_ranked_microstates(
     if ref_mol is None:
         return []
 
+    # Tautomer enumeration with aromaticity guard (FIX 7)
     enum   = rdMolStandardize.TautomerEnumerator()
     seen_t = set()
     tautomers = []
@@ -1666,6 +1551,7 @@ def _generate_ranked_microstates(
     if not kept:
         kept = [tautomers[0]]
 
+    # Ionizable sites from input molecule (FIX 5 — claimed_atoms)
     ion_sites = _find_ionizable_sites(ref_mol)
 
     ph_lo = max(0.0,  target_ph - ph_window / 2)
@@ -1675,6 +1561,7 @@ def _generate_ranked_microstates(
     seen_smi  = set()
 
     for taut in kept:
+        # Dimorphite-DL enumeration
         raw_states = [taut["smiles"]]
         try:
             from dimorphite_dl import protonate_smiles as _dim
@@ -1703,6 +1590,7 @@ def _generate_ranked_microstates(
         except Exception:
             pass
 
+        # FIX 10: supplement for sites Dimorphite missed
         microstates = _supplement_dimorphite(
             taut["smiles"], raw_states, ion_sites, target_ph
         )
@@ -1732,8 +1620,16 @@ def _generate_ranked_microstates(
     return all_micro
 
 
+# ── FIX 12: _apply_ionizable_site_correction (uses fixed site detection) ─────
+
 def _apply_ionizable_site_correction(original_smiles: str, current_smiles: str,
                                       ph: float, log: list) -> str:
+    """
+    FIX 12: Post-Dimorphite correction using the FIXED _find_ionizable_sites.
+    Deprotonates any acid site with pKa < pH still protonated in current_smiles.
+    Now works for flavonoids because _find_ionizable_sites uses claimed_atoms
+    (FIX 5) and correct A-ring pKas (Fixes 1-4).
+    """
     from rdkit import Chem
     mol = Chem.MolFromSmiles(current_smiles)
     if mol is None:
@@ -1770,25 +1666,51 @@ def _apply_ionizable_site_correction(original_smiles: str, current_smiles: str,
         return current_smiles
 
 
+# ── protonate_pkanet: public API (unchanged signature) ───────────────────────
+# NOTE: delegates entirely to pKaNET.py (generate_ranked_microstates) which
+# contains the authoritative, bug-fixed implementation (2026-05 overhaul).
+# Bugs fixed in pKaNET.py that were present in the old internal implementation:
+#   Bug #1/#2  imidazole/benzimidazole pKa (6.0/5.5 → 14/13)
+#   Bug A      phosphonate double-counting
+#   Bug B      thiol_aliph pKa (10.5 → 9.8) + new thiol_alpha_amino (8.3)
+#   Bug C      missing hydroxamic acid entry
+#   Bug D      phosphate_diester label/pKa wrong
+#   Bug F      catechol_OH priority
+#   Bug G      new amine_alpha_EWG entry (pKa=7.5)
+#   + new entries: sulfonyl_imide_NH, enol_lactone, enol_cyclic_dicarbonyl,
+#                  enol_1_3_dicarbonyl, pyrazole_NH, indole_NH, aliphatic_imine
+
+
 def _load_local_pkanet_module(log=None):
+    """
+    Force-load pKaNET.py from the same folder as core.py.
+    This avoids importing an old/cached/wrong pKaNET module from sys.path.
+    """
     import importlib.util
     import sys
     import hashlib
     from pathlib import Path
 
-    pkanet_path = Path(__file__).resolve().with_name("pKaNET.py")
+    core_dir = Path(__file__).resolve().parent
+    pkanet_path = None
+    for name in ("pKaNET.py", "pkanet.py"):
+        candidate = core_dir / name
+        if candidate.exists():
+            pkanet_path = candidate
+            break
 
-    if not pkanet_path.exists():
-        raise FileNotFoundError(f"pKaNET.py not found next to core.py: {pkanet_path}")
+    if pkanet_path is None:
+        raise FileNotFoundError(f"pKaNET.py/pkanet.py not found next to core.py: {core_dir}")
 
     module_name = "pKaNET_local_ACD"
 
+    # Always reload the local file to avoid stale module cache.
     if module_name in sys.modules:
         del sys.modules[module_name]
 
     spec = importlib.util.spec_from_file_location(module_name, str(pkanet_path))
     if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot load pKaNET.py from: {pkanet_path}")
+        raise ImportError(f"Cannot load pKaNET module from: {pkanet_path}")
 
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -1801,7 +1723,9 @@ def _load_local_pkanet_module(log=None):
     return mod
 
 
+
 def _pkanet_stereo_status(smiles: str) -> dict:
+    """Detect whether a SMILES has assigned/undefined tetrahedral stereochemistry."""
     from rdkit import Chem
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
@@ -1813,6 +1737,10 @@ def _pkanet_stereo_status(smiles: str) -> dict:
 
 
 def _select_pkanet_stereoisomer(smiles: str, stereo_choice: str = "keep_input") -> tuple[str, list[str], dict]:
+    """
+    Select R/S only when the input SMILES has one undefined chiral center.
+    If the input already contains assigned stereochemistry (@/@@; RDKit R/S), it is kept unchanged.
+    """
     from rdkit import Chem
     from rdkit.Chem.EnumerateStereoisomers import EnumerateStereoisomers, StereoEnumerationOptions
 
@@ -1856,7 +1784,6 @@ def _select_pkanet_stereoisomer(smiles: str, stereo_choice: str = "keep_input") 
     log.append(f"⚠ Could not generate requested {choice} stereoisomer; keeping input")
     return Chem.MolToSmiles(mol, isomericSmiles=True, canonical=True), log, status
 
-
 def protonate_pkanet(
     smiles: str,
     ph: float,
@@ -1868,10 +1795,21 @@ def protonate_pkanet(
     stereo_choice: str = "keep_input",
     return_details: bool = False,
 ) -> tuple:
+    """
+    pKaNET Cloud protonation pipeline.
+    Returns (selected_smiles, charge, log_list).
+    If return_details=True, returns (selected_smiles, charge, log_list, details_dict).
+
+    Important:
+    - This function force-loads ./pKaNET.py from the same folder as core.py.
+    - It does NOT silently fall back to Dimorphite-DL when pKaNET mode is selected.
+      If pKaNET fails, the app should stop and show the error/log.
+    """
     from rdkit import Chem
 
     log = []
 
+    # ── Import authoritative local pKaNET.py ────────────────────────────────
     try:
         pk = _load_local_pkanet_module(log)
 
@@ -1887,9 +1825,11 @@ def protonate_pkanet(
             "Please check that pKaNET.py is in the same folder as core.py."
         ) from e
 
+    # ── Stage 0: optional stereochemistry resolution ────────────────────────
     stereo_input, stereo_log, stereo_status = _select_pkanet_stereoisomer(smiles.strip(), stereo_choice)
     log.extend(stereo_log)
 
+    # ── Stage A: Standardize via pKaNET ─────────────────────────────────────
     canonical, std_status = _pkanet_standardize(stereo_input)
     if canonical is None:
         log.append(f"❌ Standardization failed ({std_status})")
@@ -1897,6 +1837,7 @@ def protonate_pkanet(
 
     log.append("✓ RDKit standardized (pKaNET)")
 
+    # ── Stage B: PubChem pKa lookup via pKaNET ──────────────────────────────
     pubchem_result = {}
     if use_pubchem:
         try:
@@ -1912,9 +1853,11 @@ def protonate_pkanet(
                     f"({pubchem_result.get('error', '')})"
                 )
         except Exception as e:
+            # PubChem is optional evidence; do not stop pKaNET.
             pubchem_result = {}
             log.append(f"⚠ PubChem lookup failed: {e}")
 
+    # ── Stage C: Ranked microstates via pKaNET.py ───────────────────────────
     try:
         top, ambiguous, all_micro, tr_flag, tr_motifs, ml_preds = _pkanet_rank(
             canonical,
@@ -1932,6 +1875,7 @@ def protonate_pkanet(
         log.append("❌ pKaNET returned no microstates")
         raise RuntimeError("pKaNET returned no microstates. No fallback was used.")
 
+    # Compact ranked summary (up to top 5) — visible in Preparation log
     for r in all_micro[:5]:
         marker = " ← selected" if r.get("recommended_default") else ""
         log.append(
@@ -1941,6 +1885,7 @@ def protonate_pkanet(
             f"{r.get('microstate_smiles','')}{marker}"
         )
 
+    # ── Stage D: choose microstate for docking ───────────────────────────────
     selection_mode = (selection_mode or "auto_recommended").strip().lower()
     if selection_mode in {"auto", "recommended", "auto recommended"}:
         selection_mode = "auto_recommended"
@@ -1988,10 +1933,21 @@ def protonate_pkanet(
 
     if tr_flag:
         log.append(f"⚠ Tautomer-rich motifs: {', '.join(tr_motifs)}")
+    if best.get("flag_amide_preserved"):
+        log.append("✓ Amide bond preserved")
+    if best.get("flag_imidic_acid_penalty"):
+        log.append("⚠ Imidic-acid tautomer penalised")
+    if best.get("flag_aromaticity_lost"):
+        log.append("⚠ Aromaticity lost in top microstate")
+    if best.get("is_zwitterion_strict"):
+        log.append("✓ Zwitterion detected")
+    if best.get("flag_borderline_pka"):
+        log.append("⚠ Borderline pKa — protonation state uncertain near pH target")
 
     log.append(f"✓ Final pKaNET SMILES: {best_smi}")
     log.append(f"✓ Formal charge: {charge:+d}")
 
+    # Safety check: charge must match the returned SMILES.
     mol = Chem.MolFromSmiles(best_smi)
     if mol is None:
         raise RuntimeError(f"pKaNET returned invalid SMILES: {best_smi}")
@@ -2023,11 +1979,12 @@ def protonate_pkanet(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  LIGAND PREPARATION  (unchanged from original)
+#  LIGAND PREPARATION
 # ══════════════════════════════════════════════════════════════════════════════
 
 
 def _meeko_to_pdbqt(mol, out_path: str):
+    """Convert an RDKit mol to PDBQT via Meeko."""
     from meeko import MoleculePreparation
     prep = MoleculePreparation()
     try:
@@ -2085,7 +2042,19 @@ def prepare_ligand(
     pkanet_selection_mode: str = "auto_recommended",
     pkanet_manual_rank: int | None = None,
     pkanet_stereo_choice: str = "keep_input",
+    conformer_seed: int | None = None,
 ) -> dict:
+    """
+    Ligand preparation — pKaNET Cloud is the default protonation mode.
+
+    Behavior:
+      - pkanet     : full tautomer-aware microstate ranking via pKaNET.py (default)
+      - neutral    : keep the input connectivity/charge state, add H only
+      - dimorphite : protonate with Dimorphite-DL (legacy fallback, kept for compatibility)
+
+    Charge reporting is always based on RDKit formal charge of the final SMILES
+    actually used for 3D building and docking.
+    """
     _rdkit_six_patch()
     from rdkit import Chem
     from rdkit.Chem import AllChem
@@ -2122,6 +2091,7 @@ def prepare_ligand(
                     stereo_choice=pkanet_stereo_choice,
                     return_details=True,
                 )
+                # Export ranked microstates and decision log for reproducibility/ESI.
                 try:
                     import csv as _csv
                     safe_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in str(name)) or "ligand"
@@ -2162,6 +2132,8 @@ def prepare_ligand(
                     )
                     if vs:
                         _vs_list = vs if isinstance(vs, list) else [vs]
+                        # Prefer the state with the smallest absolute charge
+                        # (avoids the Dimorphite bug of listing [n-] before neutral)
                         from rdkit import Chem as _Chem
                         def _abs_charge(s):
                             m = _Chem.MolFromSmiles(s)
@@ -2176,6 +2148,7 @@ def prepare_ligand(
                     log.append(f"⚠ Dimorphite-DL fallback skipped: {e2}")
 
         else:
+            # dimorphite (legacy compatibility)
             try:
                 from dimorphite_dl import protonate_smiles
                 _win = ph_window * 0.5
@@ -2208,14 +2181,32 @@ def prepare_ligand(
         log.append(f"✓ Charged atoms: {_charged_atoms_text(charge_info['charged_atoms'])}")
 
         mol = Chem.AddHs(mol)
+        _requested_conformer_seed = (
+            None if conformer_seed is None or int(conformer_seed) == 0
+            else int(conformer_seed)
+        )
+        if _requested_conformer_seed is not None and _requested_conformer_seed < 0:
+            raise ValueError("conformer_seed must be 0/random or a positive integer")
+        if _requested_conformer_seed is None:
+            import secrets as _secrets
+            _conformer_seed = _secrets.randbelow(2_147_483_646) + 1
+            _conformer_seed_mode = "random"
+        else:
+            _conformer_seed = _requested_conformer_seed
+            _conformer_seed_mode = "fixed"
+        log.append(
+            f"✓ RDKit ETKDG conformer seed: {_conformer_seed} ({_conformer_seed_mode})"
+        )
         try:
             params = AllChem.ETKDGv3()
         except AttributeError:
             params = AllChem.ETKDG()
-        params.randomSeed = 42
+        params.randomSeed = _conformer_seed
 
         if AllChem.EmbedMolecule(mol, params) == -1:
-            AllChem.EmbedMolecule(mol, useRandomCoords=True, randomSeed=42)
+            _fallback = {"useRandomCoords": True}
+            _fallback["randomSeed"] = _conformer_seed
+            AllChem.EmbedMolecule(mol, **_fallback)
 
         if AllChem.MMFFHasAllMoleculeParams(mol):
             AllChem.MMFFOptimizeMolecule(mol, maxIters=500)
@@ -2259,6 +2250,8 @@ def prepare_ligand(
             "pkanet_ranked_csv": pkanet_ranked_csv,
             "pkanet_decision_log": pkanet_decision_log,
             "pkanet_ambiguous": pkanet_details.get("ambiguous", False),
+            "conformer_seed":    _conformer_seed,
+            "conformer_seed_mode": _conformer_seed_mode,
             "log":               log,
         }
 
@@ -2266,7 +2259,13 @@ def prepare_ligand(
         log.append(f"ERROR: {e}")
         return {"success": False, "error": str(e), "log": log}
 
-def prepare_ligand_from_file(file_path: str, name: str, wdir) -> dict:
+def prepare_ligand_from_file(file_path: str, name: str, wdir,
+                             conformer_seed: int | None = None) -> dict:
+    """
+    Prepare a ligand directly from an uploaded structure file (PDB/SDF/MOL2)
+    WITHOUT protonation — use the molecule exactly as provided.
+    Returns dict: success, pdbqt, sdf, prot_smiles, charge, log, error
+    """
     _rdkit_six_patch()
     from rdkit import Chem
     from rdkit.Chem import AllChem
@@ -2289,6 +2288,7 @@ def prepare_ligand_from_file(file_path: str, name: str, wdir) -> dict:
                 mol = mols[0]
         elif ext in (".mol2", ".pdb"):
             _ob_sdf = str(wdir / f"{name}_ob.sdf")
+            import subprocess
             subprocess.run(
                 ["obabel", file_path, "-O", _ob_sdf],
                 capture_output=True, timeout=30,
@@ -2344,15 +2344,36 @@ def prepare_ligand_from_file(file_path: str, name: str, wdir) -> dict:
         mol = Chem.AddHs(mol, addCoords=True)
         log.append("✓ All hydrogens made explicit")
 
+        _requested_conformer_seed = (
+            None if conformer_seed is None or int(conformer_seed) == 0
+            else int(conformer_seed)
+        )
+        if _requested_conformer_seed is not None and _requested_conformer_seed < 0:
+            raise ValueError("conformer_seed must be 0/random or a positive integer")
+        _conformer_seed = None
+        _conformer_seed_mode = "not_used"
+
         conf = mol.GetConformer(0) if mol.GetNumConformers() > 0 else None
         if conf is None or conf.Is3D() is False:
+            if _requested_conformer_seed is None:
+                import secrets as _secrets
+                _conformer_seed = _secrets.randbelow(2_147_483_646) + 1
+                _conformer_seed_mode = "random"
+            else:
+                _conformer_seed = _requested_conformer_seed
+                _conformer_seed_mode = "fixed"
+            log.append(
+                f"✓ RDKit ETKDG conformer seed: {_conformer_seed} ({_conformer_seed_mode})"
+            )
             try:
                 params = AllChem.ETKDGv3()
             except AttributeError:
                 params = AllChem.ETKDG()
-            params.randomSeed = 42
+            params.randomSeed = _conformer_seed
             if AllChem.EmbedMolecule(mol, params) == -1:
-                AllChem.EmbedMolecule(mol, useRandomCoords=True, randomSeed=42)
+                _fallback = {"useRandomCoords": True}
+                _fallback["randomSeed"] = _conformer_seed
+                AllChem.EmbedMolecule(mol, **_fallback)
             if AllChem.MMFFHasAllMoleculeParams(mol):
                 AllChem.MMFFOptimizeMolecule(mol, maxIters=500)
             else:
@@ -2369,6 +2390,7 @@ def prepare_ligand_from_file(file_path: str, name: str, wdir) -> dict:
             log.append("✓ PDBQT written (Meeko)")
         except Exception as e_meeko:
             log.append(f"⚠ Meeko failed ({e_meeko}), trying OpenBabel…")
+            import subprocess
             subprocess.run(
                 ["obabel", out_sdf, "-O", out_pdbqt, "-xh"],
                 capture_output=True, timeout=30,
@@ -2383,6 +2405,8 @@ def prepare_ligand_from_file(file_path: str, name: str, wdir) -> dict:
             "sdf":         out_sdf,
             "prot_smiles": smi,
             "charge":      charge,
+            "conformer_seed": _conformer_seed,
+            "conformer_seed_mode": _conformer_seed_mode,
             "log":         log,
         }
     except Exception as e:
@@ -2391,6 +2415,7 @@ def prepare_ligand_from_file(file_path: str, name: str, wdir) -> dict:
 
 
 def smiles_from_file(file_path: str, wdir) -> str:
+    """Extract SMILES from SDF / MOL2 / PDB. Raises ValueError on failure."""
     wdir = Path(wdir)
     ext  = Path(file_path).suffix.lower()
     if ext == ".sdf":
@@ -2410,7 +2435,7 @@ def smiles_from_file(file_path: str, wdir) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  DOCKING  (unchanged from original)
+#  DOCKING
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_vina(
@@ -2483,13 +2508,14 @@ def run_vina(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  BOND ORDER CORRECTION  (unchanged from original)
+#  BOND ORDER CORRECTION
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _bo_template(smiles: str):
     from rdkit import Chem
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
+        # Fallback for charged/tautomeric SMILES (e.g. flavonoids with [O-])
         mol = Chem.MolFromSmiles(smiles, sanitize=False)
         if mol is None:
             raise ValueError(f"Cannot parse SMILES: {smiles!r}")
@@ -2502,6 +2528,8 @@ def _bo_template(smiles: str):
     try:
         Chem.Kekulize(mol, clearAromaticFlags=True)
     except Exception:
+        # Kekulize fails for some tautomeric/charged aromatics (e.g. flavonoids with [O-])
+        # AssignBondOrdersFromTemplate still works without explicit Kekulization
         pass
     return mol
 
@@ -2552,6 +2580,10 @@ def fix_sdf_bond_orders(raw_sdf: str, smiles: str, fixed_sdf: str) -> list:
         try:
             fixed = _bo_fix_mol(mol, template)
             try:
+                # Protect deprotonated atoms (formal charge != 0) from getting
+                # H added back by AddHs — e.g. [O-] on baicalein/flavonoids.
+                # Strategy: temporarily set noImplicit=True on charged atoms,
+                # call AddHs, then restore.
                 from rdkit.Chem import RWMol
                 rw = RWMol(fixed)
                 charged_idx = []
@@ -2585,7 +2617,7 @@ def fix_sdf_bond_orders(raw_sdf: str, smiles: str, fixed_sdf: str) -> list:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SDF UTILITIES  (unchanged from original)
+#  SDF UTILITIES
 # ══════════════════════════════════════════════════════════════════════════════
 
 def load_mols_from_sdf(sdf_path: str, sanitize: bool = True) -> list:
@@ -2675,7 +2707,7 @@ def convert_sdf_to_v2000(sdf_path: str) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  STRUCTURAL ANALYSIS  (unchanged from original)
+#  STRUCTURAL ANALYSIS
 # ══════════════════════════════════════════════════════════════════════════════
 
 def get_interacting_residues(receptor_pdb: str, lig_mol, cutoff: float = 3.5) -> list:
@@ -2770,7 +2802,7 @@ def calc_rmsd_heavy(pose_mol, crystal_pdb_path: str):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  POSEVIEW REST API  (unchanged from original)
+#  POSEVIEW REST API
 # ══════════════════════════════════════════════════════════════════════════════
 
 _PP_BASE          = "https://proteins.plus/api/v2/"
@@ -3028,10 +3060,11 @@ def diagnose_poseview() -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  IMAGE UTILITIES  (unchanged from original)
+#  IMAGE UTILITIES
 # ══════════════════════════════════════════════════════════════════════════════
 
 def svg_to_png(svg_bytes: bytes):
+    """Convert SVG bytes -> PNG bytes via cairosvg. Returns None if unavailable."""
     try:
         import cairosvg
         return cairosvg.svg2png(bytestring=svg_bytes, scale=2, background_color="white")
@@ -3040,28 +3073,25 @@ def svg_to_png(svg_bytes: bytes):
 
 
 def stamp_png(png_bytes: bytes, text: str) -> bytes:
+    """Burn a centred label pill into the bottom of a PNG."""
     try:
         from PIL import Image, ImageDraw, ImageFont
         import io as _io
         img  = Image.open(_io.BytesIO(png_bytes)).convert("RGBA")
         draw = ImageDraw.Draw(img)
         font = None
-        _font_candidates = [
-            # Linux
+        for fp, sz in [
             ("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", 28),
             ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 28),
             ("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 26),
-            # macOS (system + Homebrew)
             ("/System/Library/Fonts/Supplemental/Arial.ttf", 28),
             ("/System/Library/Fonts/Helvetica.ttc", 28),
             ("/Library/Fonts/Arial.ttf", 28),
             ("/opt/homebrew/share/fonts/liberation-fonts/LiberationSans-Regular.ttf", 28),
-            # Windows
             ("C:/Windows/Fonts/arial.ttf", 28),
             ("C:/Windows/Fonts/segoeui.ttf", 28),
             ("C:/Windows/Fonts/calibri.ttf", 28),
-        ]
-        for fp, sz in _font_candidates:
+        ]:
             try:
                 font = ImageFont.truetype(fp, sz); break
             except Exception:
@@ -3092,7 +3122,8 @@ def stamp_png(png_bytes: bytes, text: str) -> bytes:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  CUSTOM 2D INTERACTION DIAGRAM  (unchanged from original)
+#  CUSTOM 2D INTERACTION DIAGRAM
+#  (unchanged from original — full implementation below)
 # ══════════════════════════════════════════════════════════════════════════════
 
 import math as _math
@@ -3169,6 +3200,7 @@ _AROM_ATOM_NAMES = {
 
 _HYDR_BASE     = {"ALA","VAL","ILE","LEU","MET","PHE","TRP","PRO","GLY","TYR","HIS"}
 _HYDR_EXTENDED = _HYDR_BASE | HEME_RESNAMES
+
 
 
 def _get_aromatic_ring_data(mol, conf):
@@ -3617,29 +3649,6 @@ def _place_residues_no_cross(interactions, svg_coords, cx, cy, R=210):
     return result
 
 
-def _place_residues_pca(interactions, svg_coords, mol3d, cx, cy, R=210):
-    if not interactions: return []
-    try:
-        import numpy as _np_rc
-        NODE_R = 24.55; GAP = 45.0; ATOM_R = 20.0
-        lx, ly  = _rl_ligand_center(svg_coords)
-        atom_xy = list(svg_coords.values())
-        anchor_a = [_rl_anchor_angle(ix, svg_coords, lx, ly) for ix in interactions]
-        order    = sorted(range(len(interactions)), key=lambda k: anchor_a[k])
-        sorted_ix = [interactions[k] for k in order]
-        rng       = _np_rc.random.default_rng(42)
-        positions = _rl_place_radially(sorted_ix, svg_coords, lx, ly, atom_xy, ATOM_R, GAP, NODE_R, rng)
-        positions = _rl_resolve_overlaps(positions, atom_xy, lx, ly, node_r=NODE_R, excl_r=NODE_R + ATOM_R)
-        positions = _rl_reduce_crossings(sorted_ix, positions, svg_coords, lx, ly)
-        result = []
-        for k, (bx, by) in enumerate(positions):
-            ang = _math.atan2(by - ly, bx - lx)
-            result.append({**sorted_ix[k], "angle": ang, "bx": float(bx), "by": float(by), "slot_angle": ang})
-        return result
-    except Exception:
-        return _place_residues_no_cross(interactions, svg_coords, cx, cy, R)
-
-
 def _rl_ligand_center(svg_coords):
     pts = list(svg_coords.values())
     if not pts: return 400.0, 380.0
@@ -3760,6 +3769,29 @@ def _rl_reduce_crossings(ix_list, bx_by, svg_coords, cx, cy):
                     bx_by[i], bx_by[j] = bx_by[j], bx_by[i]; improved = True
         if not improved: break
     return bx_by
+
+
+def _place_residues_pca(interactions, svg_coords, mol3d, cx, cy, R=210):
+    if not interactions: return []
+    try:
+        import numpy as _np_rc
+        NODE_R = 24.55; GAP = 45.0; ATOM_R = 20.0
+        lx, ly  = _rl_ligand_center(svg_coords)
+        atom_xy = list(svg_coords.values())
+        anchor_a = [_rl_anchor_angle(ix, svg_coords, lx, ly) for ix in interactions]
+        order    = sorted(range(len(interactions)), key=lambda k: anchor_a[k])
+        sorted_ix = [interactions[k] for k in order]
+        rng       = _np_rc.random.default_rng(42)
+        positions = _rl_place_radially(sorted_ix, svg_coords, lx, ly, atom_xy, ATOM_R, GAP, NODE_R, rng)
+        positions = _rl_resolve_overlaps(positions, atom_xy, lx, ly, node_r=NODE_R, excl_r=NODE_R + ATOM_R)
+        positions = _rl_reduce_crossings(sorted_ix, positions, svg_coords, lx, ly)
+        result = []
+        for k, (bx, by) in enumerate(positions):
+            ang = _math.atan2(by - ly, bx - lx)
+            result.append({**sorted_ix[k], "angle": ang, "bx": float(bx), "by": float(by), "slot_angle": ang})
+        return result
+    except Exception:
+        return _place_residues_no_cross(interactions, svg_coords, cx, cy, R)
 
 
 def _render_ligand_svg(mol2d, svg_coords):
@@ -3943,7 +3975,7 @@ def _build_diagram_data(receptor_pdb, pose_sdf, smiles, cutoff, max_residues, si
             break
     if mol3d is None or mol3d.GetNumConformers() == 0:
         raise ValueError("No valid 3D pose in SDF")
-
+    # ── Robust mol2d from SMILES (handles charged/tautomeric aromatics) ──────
     def _parse_smi_robust(smi):
         if not smi: return None
         m = Chem.MolFromSmiles(smi)
@@ -3973,6 +4005,9 @@ def _build_diagram_data(receptor_pdb, pose_sdf, smiles, cutoff, max_residues, si
     try: Chem.SanitizeMol(m3)
     except: pass
 
+    # ── Charge-agnostic substructure matching ─────────────────────────────
+    # GetSubstructMatch fails when mol2d has [O-] but m3 from raw Vina SDF
+    # has no formal charges. Strip charges on both sides for matching only.
     m3to2d = {}
     try:
         def _strip_charges(mol):
@@ -4245,5 +4280,6 @@ def draw_interaction_diagram_interactive(
             "lx":      round(lx, 2), "ly": round(ly, 2),
             "bx":      round(p["bx"], 2), "by": round(p["by"], 2),
         })
+    # Return minimal interactive HTML (full version in app.py _render_interactive_diagram)
     return json.dumps({"placements": residues_js, "W": W, "H": H,
                        "ligand_svg": lig_svg, "title": title})
