@@ -18,6 +18,33 @@ from rdkit.Chem import AllChem, rdMolDescriptors
 from rdkit.Chem.EnumerateStereoisomers import EnumerateStereoisomers, StereoEnumerationOptions
 from rdkit.Chem.MolStandardize import rdMolStandardize
 
+
+def _silence_rdkit_logs():
+    try:
+        from rdkit import RDLogger, rdBase
+        for name in ("rdApp.*", "rdApp.error", "rdApp.warning", "rdApp.info", "rdApp.debug"):
+            try:
+                RDLogger.DisableLog(name)
+            except Exception:
+                pass
+            try:
+                rdBase.DisableLog(name)
+            except Exception:
+                pass
+        try:
+            RDLogger.EnableLog = lambda *args, **kwargs: None
+        except Exception:
+            pass
+        try:
+            rdBase.EnableLog = lambda *args, **kwargs: None
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+_silence_rdkit_logs()
+
 __version__ = "81"
 
 # ─────────────────────────────────────────────────────────────────────────────
