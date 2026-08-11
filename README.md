@@ -12,51 +12,68 @@ Batch docking with 4 docking engines: [![Open In Colab](https://colab.research.g
 
 ---
 
-## 🖥️ Run locally
+## 🖥️ Run Streamlit locally
 
-### Google Colab (web-based interface)
-Run locally on Google colab with web-based interface: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1WtWYUUB1AREZMeB5qEJ9OD84AvWk1z4z?usp=sharing)
+The local app uses the deterministic heuristic pKaNET backend.
+ML pKa backends are disabled.
 
+### Linux (Ubuntu/Debian)
 
-### Linux (Ubuntu / Debian)
 ```bash
-sudo apt install python3.11 python3.11-venv openbabel libcairo2-dev libpangocairo-1.0-0 && \
-git clone https://github.com/nyelidl/anyone-docking-local.git && \
-cd anyone-docking-local && \
-python3.11 -m venv venv && \
-source venv/bin/activate && \
-pip install -r requirements.txt && \
+sudo apt update
+
+sudo apt install -y \
+  python3.11 \
+  python3.11-venv \
+  openbabel \
+  libcairo2-dev \
+  libpango1.0-dev \
+  libpangocairo-1.0-0
+
+git clone https://github.com/nyelidl/anyone-docking-local.git
+cd anyone-docking-local
+
+python3.11 -m venv venv
+source venv/bin/activate
+
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+
 streamlit run app.py
 ```
 
 ### macOS
 ```bash
-brew install python@3.11 open-babel cairo pango && \
-git clone https://github.com/nyelidl/anyone-docking-local.git && \
-cd anyone-docking-local && \
-python3.11 -m venv venv && \
-source venv/bin/activate && \
-pip install -r requirements.txt && \
+brew update
+brew install python@3.11 open-babel cairo pango
+
+git clone https://github.com/nyelidl/anyone-docking-local.git
+cd anyone-docking-local
+
+python3.11 -m venv venv
+source venv/bin/activate
+
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+
 streamlit run app.py
 ```
 
-> **Apple Silicon (M1/M2/M3/M4):** Fully supported — the app auto-downloads the correct `aarch64` Vina binary.
+> **Apple Silicon (M1–M4):** Fully supported — the app auto-downloads the correct `aarch64` Vina binary.
 
 ### Windows
 
-> **Recommended:** Use [WSL2](https://learn.microsoft.com/en-us/windows/wsl/) with Ubuntu and follow the Linux instructions above — it's the simplest and most reliable path.
+> **Recommended:** Use [WSL2](https://learn.microsoft.com/en-us/windows/wsl/) with Ubuntu and follow the Linux instructions above.
 
-For native Windows, install dependencies manually first:
-1. **OpenBabel** — download the installer from [openbabel.org](https://openbabel.org/wiki/Category:Installation) and add it to PATH
-2. **Cairo & Pango** — easiest via conda: `conda install -c conda-forge cairo pango`
+For native Windows:
+1. Install **OpenBabel** from [openbabel.org](https://openbabel.org/wiki/Category:Installation) and add to PATH
+2. Install **Cairo/Pango** via conda: `conda install -c conda-forge cairo pango`
 
-Then:
 ```bash
-git clone https://github.com/nyelidl/anyone-docking-local.git && \
-cd anyone-docking-local && \
-python -m venv venv && \
-venv\Scripts\activate && \
-pip install -r requirements.txt && \
+git clone https://github.com/nyelidl/anyone-docking-local.git
+cd anyone-docking-local
+python -m venv venv && venv\Scripts\activate
+pip install -r requirements.txt
 streamlit run app.py
 ```
 
