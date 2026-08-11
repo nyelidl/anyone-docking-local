@@ -61,6 +61,12 @@ streamlit run app.py
 
 > **Apple Silicon (M1–M4):** Fully supported — the app auto-downloads the correct `aarch64` Vina binary.
 
+### To run in local mode: 
+```bash
+cd anyone-docking-local
+streamlit run app.py
+```
+
 ### Windows
 
 > **Recommended:** Use [WSL2](https://learn.microsoft.com/en-us/windows/wsl/) with Ubuntu and follow the Linux instructions above.
