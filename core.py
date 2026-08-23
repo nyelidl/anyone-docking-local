@@ -1300,8 +1300,10 @@ def strip_and_convert_receptor(rec_raw: str, wdir) -> dict:
                 pdbqt_lines.extend(heme_prepared["pdbqt_lines"])
                 heme_injected = len(heme_prepared["pdbqt_lines"])
             else:
-                # Last-resort fallback if isolated Heme preparation fails.
-                for hl in heme_lines:
+                # Last-resort fallback if isolated Heme PDBQT preparation fails:
+                # preserve any hydrogens present in the hydrogenated Heme PDB block.
+                fallback_heme_lines = heme_prepared["display_lines"] or heme_lines
+                for hl in fallback_heme_lines:
                     try:
                         serial  = int(hl[6:11])
                         name    = hl[12:16].strip()
@@ -1311,7 +1313,11 @@ def strip_and_convert_receptor(rec_raw: str, wdir) -> dict:
                         x       = float(hl[30:38])
                         y       = float(hl[38:46])
                         z       = float(hl[46:54])
-                        if name.upper() in ("FE", "FE2", "FE3"):
+                        element = (hl[76:78].strip() if len(hl) > 77 else "") or _infer_pdb_element(hl).strip()
+                        if element.upper() == "H" or name.upper().startswith("H"):
+                            atype  = "HD"
+                            charge = 0.0
+                        elif name.upper() in ("FE", "FE2", "FE3"):
                             atype  = "Fe"
                             charge = +3.0
                         elif name.upper().startswith("N"):
