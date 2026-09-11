@@ -17,6 +17,8 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
+from heme_state import HemeStateError, detect_heme_centers
+
 from core import (
     prepare_receptor,
     prepare_ligand,
@@ -4321,6 +4323,41 @@ def _receptor_section(pfx: str, wdir: Path, step_label: str):
                 with open(_scan_path, "wb") as _sf:
                     _sf.write(upload_file.getvalue() if hasattr(upload_file, "getvalue") else upload_file.read())
 
+            _heme_states_for_prep = {}
+            if _scan_path and os.path.exists(_scan_path):
+                try:
+                    _heme_scan_path = _scan_path
+                    if is_cif_file(_heme_scan_path):
+                        _heme_scan_path = str(wdir / "heme_state_scan.pdb")
+                        _heme_cif = convert_cif_to_pdb(_scan_path, _heme_scan_path)
+                        if not _heme_cif.get("success"):
+                            raise HemeStateError(_heme_cif.get("error", "CIF conversion failed"))
+                    _heme_centers = detect_heme_centers(_heme_scan_path)
+                    if _heme_centers:
+                        st.markdown("**Heme state**")
+                    for _hc_i, _hc in enumerate(_heme_centers, 1):
+                        _heme_states_for_prep[_hc["key"]] = "auto"
+                        _state_label = "Compound I" if _hc["state"] == "CPD_I" else "Ferric/resting HEM"
+                        _oxo_text = (
+                            f" · Oxo {_hc['oxo_name']} #{_hc['oxo_serial']} · Fe-O {_hc['fe_o_distance']:.2f} Å"
+                            if _hc.get("oxo_serial") else " · Oxo none"
+                        )
+                        st.info(
+                            f"Center {_hc_i}: **{_state_label}** · {_hc['resname']} {_hc['chain']} {_hc['resid']} · "
+                            f"Fe #{_hc['fe_serial']}{_oxo_text} · "
+                            f"proximal {_hc['cys_resname']} {_hc['cys_chain']}:{_hc['cys_resid']} SG "
+                            f"(Fe-S {_hc['fe_s_distance']:.2f} Å)"
+                        )
+                        if _hc.get("oxo_h_serial"):
+                            st.warning(
+                                f"Axial oxo H #{_hc['oxo_h_serial']} detected at {_hc['oh_distance']:.2f} Å; "
+                                "only this hydrogen will be removed during preparation."
+                            )
+                    st.session_state[pfx + "heme_states"] = _heme_states_for_prep
+                except HemeStateError as _heme_error:
+                    st.error(f"Heme validation: {_heme_error}")
+                    st.session_state[pfx + "heme_states"] = {"__error__": str(_heme_error)}
+
             def _lig_label(_r):
                 _ch = _r.get("chain") or "—"
                 _lig_name = _r.get("full_resname") or _r.get("resname")
@@ -4578,6 +4615,11 @@ def _receptor_section(pfx: str, wdir: Path, step_label: str):
                 f.write(upload_file.read())
             st.session_state[pfx + "pdb_token"] = Path(upload_file.name).stem
 
+        _stored_heme_states = st.session_state.get(pfx + "heme_states", {})
+        if "__error__" in _stored_heme_states:
+            st.error(f"❌ Receptor preparation stopped: {_stored_heme_states['__error__']}")
+            st.stop()
+
         # ── Deduplicate identical protein chains ──────────────────────────
         try:
             from prody import parsePDB as _pPDB_ch, writePDB as _wPDB_ch
@@ -4663,6 +4705,7 @@ def _receptor_section(pfx: str, wdir: Path, step_label: str):
                 preferred_ligand = st.session_state.get(pfx + "preferred_ligand", ""),
                 hetatm_policy    = st.session_state.get(pfx + "hetatm_policy", {}),
                 reference_hetatm_key = st.session_state.get(pfx + "reference_hetatm_key", ""),
+                heme_states       = _stored_heme_states,
             )
 
         if result["success"]:
@@ -5844,14 +5887,9 @@ with tab_basic:
                 write_single_pose_pdb_with_h(sel_mol, sp_raw_pdb_h)
                 st.download_button(f"⬇ Pose {pose_idx+1} (.sdf)", open(sp_raw, "rb"),
                     file_name=f"pose_{pose_idx+1}.sdf", key=f"dl_p_{pose_idx}", width='stretch')
-                st.download_button(f"⬇ Pose {pose_idx+1} (.sdf, with H)", open(sp_raw_h, "rb"),
-                    file_name=f"pose_{pose_idx+1}_with_H.sdf", key=f"dl_p_h_{pose_idx}", width='stretch')
                 st.download_button(f"⬇ Pose {pose_idx+1} (.pdb)", open(sp_raw_pdb, "rb"),
                     file_name=f"pose_{pose_idx+1}.pdb", mime="chemical/x-pdb",
                     key=f"dl_p_pdb_{pose_idx}", width='stretch')
-                st.download_button(f"⬇ Pose {pose_idx+1} (.pdb, with H)", open(sp_raw_pdb_h, "rb"),
-                    file_name=f"pose_{pose_idx+1}_with_H.pdb", mime="chemical/x-pdb",
-                    key=f"dl_p_pdb_h_{pose_idx}", width='stretch')
                 st.download_button("⬇ All poses (.pdbqt)", open(st.session_state.output_pdbqt, "rb"),
                     file_name=f"{st.session_state.dock_base}_out.pdbqt", key="dl_pdbqt", width='stretch')
                 if df is not None:
@@ -6492,14 +6530,9 @@ with tab_batch:
                     write_single_pose_pdb_with_h(b_mols[b_pose_i], sp3_pdb_h)
                     st.download_button(f"⬇ Pose {b_pose_i+1} (.sdf)", open(sp3, "rb"),
                         file_name=f"{safe_nm}_pose{b_pose_i+1}.sdf", key="b_dl_pose", width='stretch')
-                    st.download_button(f"⬇ Pose {b_pose_i+1} (.sdf, with H)", open(sp3_h, "rb"),
-                        file_name=f"{safe_nm}_pose{b_pose_i+1}_with_H.sdf", key="b_dl_pose_h", width='stretch')
                     st.download_button(f"⬇ Pose {b_pose_i+1} (.pdb)", open(sp3_pdb, "rb"),
                         file_name=f"{safe_nm}_pose{b_pose_i+1}.pdb", mime="chemical/x-pdb",
                         key="b_dl_pose_pdb", width='stretch')
-                    st.download_button(f"⬇ Pose {b_pose_i+1} (.pdb, with H)", open(sp3_pdb_h, "rb"),
-                        file_name=f"{safe_nm}_pose{b_pose_i+1}_with_H.pdb", mime="chemical/x-pdb",
-                        key="b_dl_pose_pdb_h", width='stretch')
                     if sel_res.get("out_pdbqt") and os.path.exists(sel_res["out_pdbqt"]):
                         st.download_button("⬇ All poses (.pdbqt)", open(sel_res["out_pdbqt"], "rb"),
                             file_name=f"{safe_nm}_out.pdbqt", key="b_dl_pdbqt", width='stretch')
