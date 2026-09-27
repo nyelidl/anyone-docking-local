@@ -4076,7 +4076,34 @@ def _poseview_ui(
 #  RECEPTOR SECTION (shared between Basic and Batch)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _receptor_section(pfx: str, wdir: Path, step_label: str):
+def _render_pose_structure(pose_mol, receptor_pdb, crystal_pdb):
+    import py3Dmol
+    from rdkit import Chem
+    try:
+        vb = py3Dmol.view(width="100%", height=420)
+        vb.setBackgroundColor(_viewer_bg())
+        bmi = 0
+        _rec_fh = receptor_pdb
+        if _rec_fh and os.path.exists(_rec_fh):
+            vb.addModel(open(_rec_fh).read(), "pdb")
+            vb.setStyle({"model": bmi}, {"cartoon": {"color": "spectrum", "opacity": 0.7}, "stick": {"radius": 0.08, "opacity": 0.15}})
+            bmi += 1
+        _lig_p = crystal_pdb
+        if _lig_p and os.path.exists(_lig_p):
+            vb.addModel(open(_lig_p).read(), "pdb")
+            vb.setStyle({"model": bmi}, {"stick": {"colorscheme": "magentaCarbon", "radius": 0.2}})
+            bmi += 1
+        # Heme
+        bmi = _add_metals_heme_to_view(vb, receptor_pdb, bmi)
+        vb.addModel(Chem.MolToPDBBlock(pose_mol), "pdb")
+        vb.setStyle({"model": bmi}, {"stick": {"colorscheme": "cyanCarbon", "radius": 0.28}})
+        vb.addSurface("SES", {"opacity": 0.2, "color": "lightblue"}, {"model": 0}, {"model": bmi})
+        vb.zoomTo({"model": bmi}); vb.center({"model": bmi})
+        show3d(vb, height=420)
+    except Exception as e:
+        st.info(f"Viewer error: {e}")
+
+def _receptor_section(pfx: str, wdir: Path, step_label: str, redock_mode=False):
     import py3Dmol
     from core import run_cmd as _run_cmd
 
@@ -4225,17 +4252,21 @@ def _receptor_section(pfx: str, wdir: Path, step_label: str):
                     ),
                 )
             with _fmt_col:
-                rcsb_fmt = st.radio(
-                    "Format", ["PDB", "CIF"],
-                    horizontal=True, key=pfx + "rcsb_fmt",
-                    help=(
-                        "File format to download from RCSB.\n\n"
-                        "📖 PDB = classic format, widely compatible.\n"
-                        "   CIF = modern mmCIF, required for large structures.\n"
-                        "⚙️ Use CIF if the protein has > 62 chains or > 99,999 atoms.\n"
-                        "⚠️ If PDB download fails, try CIF."
-                    ),
-                )
+                if redock_mode:
+                    st.caption("RCSB download order: **CIF first**, then **PDB fallback** if CIF is unavailable.")
+                    rcsb_fmt = "CIF"
+                else:
+                    rcsb_fmt = st.radio(
+                        "Format", ["PDB", "CIF"],
+                        horizontal=True, key=pfx + "rcsb_fmt",
+                        help=(
+                            "File format to download from RCSB.\n\n"
+                            "📖 PDB = classic format, widely compatible.\n"
+                            "   CIF = modern mmCIF, required for large structures.\n"
+                            "⚙️ Use CIF if the protein has > 62 chains or > 99,999 atoms.\n"
+                            "⚠️ If PDB download fails, try CIF."
+                        ),
+                    )
             upload_file = None
         else:
             upload_file = st.file_uploader(
@@ -4244,6 +4275,13 @@ def _receptor_section(pfx: str, wdir: Path, step_label: str):
             )
             pdb_id   = None
             rcsb_fmt = None
+
+        if redock_mode:
+            import core as _redock_core
+            from redock_ui import receptor_setup
+            receptor_setup(st, _redock_core, wdir, pfx, src, pdb_id, upload_file)
+            st.markdown('</div>', unsafe_allow_html=True)
+            return
 
         center_mode = st.radio(
             "Grid center",
@@ -4851,7 +4889,7 @@ st.markdown(
     "Molecular docking powered by **AutoDock Vina 1.2.7,** "
     "**pKaNET Cloud**, and **RDkit**."
 )
-st.markdown("**Basic** — single ligand. **Batch** — multiple ligands.")
+st.markdown("**Single Dock** — one ligand. **Batch Dock** — multiple ligands. **Redock** — co-crystal pose validation.")
 st.markdown("**☁️ Run on Google Colab | 🌐 web-based interface**")
 
 if VINA_PATH is None:
@@ -4869,9 +4907,10 @@ st.markdown('<hr class="step-divider">', unsafe_allow_html=True)
 # ══════════════════════════════════════════════════════════════════════════════
 #  TABS
 # ══════════════════════════════════════════════════════════════════════════════
-tab_basic, tab_batch = st.tabs([
-    "🧪  Basic — single ligand",
-    "🔬  Batch — multiple ligands",
+tab_basic, tab_batch, tab_redock = st.tabs([
+    "🧪  Single Dock",
+    "🔬  Batch Dock",
+    "🎯  Redock",
 ])
 
 
@@ -6471,29 +6510,7 @@ with tab_batch:
 
                 cbv, cbd = st.columns([3, 1])
                 with cbv:
-                    try:
-                        vb = py3Dmol.view(width="100%", height=420)
-                        vb.setBackgroundColor(_viewer_bg())
-                        bmi = 0
-                        _rec_fh = st.session_state.get("b_receptor_fh")
-                        if _rec_fh and os.path.exists(_rec_fh):
-                            vb.addModel(open(_rec_fh).read(), "pdb")
-                            vb.setStyle({"model": bmi}, {"cartoon": {"color": "spectrum", "opacity": 0.7}, "stick": {"radius": 0.08, "opacity": 0.15}})
-                            bmi += 1
-                        _lig_p = st.session_state.get("b_ligand_pdb_path")
-                        if _lig_p and os.path.exists(_lig_p):
-                            vb.addModel(open(_lig_p).read(), "pdb")
-                            vb.setStyle({"model": bmi}, {"stick": {"colorscheme": "magentaCarbon", "radius": 0.2}})
-                            bmi += 1
-                        # Heme
-                        bmi = _add_metals_heme_to_view(vb, st.session_state.get("b_receptor_fh"), bmi)
-                        vb.addModel(Chem.MolToPDBBlock(b_mols[b_pose_i]), "pdb")
-                        vb.setStyle({"model": bmi}, {"stick": {"colorscheme": "cyanCarbon", "radius": 0.28}})
-                        vb.addSurface("SES", {"opacity": 0.2, "color": "lightblue"}, {"model": 0}, {"model": bmi})
-                        vb.zoomTo({"model": bmi}); vb.center({"model": bmi})
-                        show3d(vb, height=420)
-                    except Exception as e:
-                        st.info(f"Viewer error: {e}")
+                    _render_pose_structure(b_mols[b_pose_i], st.session_state.get("b_receptor_fh"), st.session_state.get("b_ligand_pdb_path"))
 
                 with cbd:
                     st.markdown("**Actions**")
@@ -6833,6 +6850,15 @@ with tab_batch:
                 )
 
     st.markdown('</div>', unsafe_allow_html=True)
+
+
+with tab_redock:
+    import core as _redock_core
+    from redock_ui import docking_controls
+    _redock_dir = WORKDIR / "redock_mode"
+    _redock_dir.mkdir(exist_ok=True)
+    _receptor_section(pfx="r_", wdir=_redock_dir, step_label="Step 1 of 2", redock_mode=True)
+    docking_controls(st, _redock_core, _redock_dir, VINA_PATH, _render_pose_structure)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
