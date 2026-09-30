@@ -4357,7 +4357,14 @@ def _receptor_section(pfx: str, wdir: Path, step_label: str, redock_mode=False):
         if redock_mode:
             import core as _redock_core
             from redock_ui import receptor_setup
-            receptor_setup(st, _redock_core, wdir, pfx, src, pdb_id, upload_file)
+            with col_b:
+                st.markdown("**Search box size (Å)**")
+                _redock_box = tuple(
+                    st.slider(f"{axis} size", 10, 40, 18, 1, key=pfx + axis)
+                    for axis in ("X", "Y", "Z")
+                )
+                st.caption("Default: 18 × 18 × 18 Å. The co-crystal ligand sets the box center.")
+            receptor_setup(st, _redock_core, wdir, pfx, src, pdb_id, upload_file, box=_redock_box)
             _prepared = st.session_state.get(pfx + "prepared")
             _inspection = st.session_state.get(pfx + "inspection")
             if _prepared and _inspection and _inspection.get("ready"):
@@ -4729,15 +4736,15 @@ def _receptor_section(pfx: str, wdir: Path, step_label: str, redock_mode=False):
                 f.write(upload_file.read())
             st.session_state[pfx + "pdb_token"] = Path(upload_file.name).stem
 
-        _stored_heme_states = st.session_state.get(pfx + "heme_states", {})
-        if "__error__" in _stored_heme_states:
-            st.error(f"❌ Receptor preparation stopped: {_stored_heme_states['__error__']}")
-            st.stop()
-
         _original_source_path = raw_path
         st.session_state[pfx + "receptor_done"] = False
         st.session_state[pfx + "pocket_report"] = None
         st.session_state["b_batch_done" if pfx == "b_" else "docking_done"] = False
+
+        _stored_heme_states = st.session_state.get(pfx + "heme_states", {})
+        if "__error__" in _stored_heme_states:
+            st.error(f"❌ Receptor preparation stopped: {_stored_heme_states['__error__']}")
+            st.stop()
 
         # ── Deduplicate identical protein chains ──────────────────────────
         try:
@@ -4923,6 +4930,10 @@ if not _OBABEL_OK:
     st.stop()
 
 st.markdown(f"{_pill('Vina 1.2.7 ready', 'success')} ", unsafe_allow_html=True)
+st.markdown(
+    "*For heavy usage, we recommend [Google Colab](https://colab.research.google.com/drive/1tApXZyT3CGziMTLG86oQe6Q7WSycK196?usp=sharing) or a local version. "
+    "For more information, visit [GitHub](https://github.com/nyelidl/anyone-docking).*"
+)
 st.markdown('<hr class="step-divider">', unsafe_allow_html=True)
 
 
