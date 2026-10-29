@@ -12,6 +12,12 @@ Batch docking with 4 docking engines using ipynb notebook in google colab: [![Op
 
 ---
 
+📘 **[👉 CLICK HERE TO ACCESS THE TUTORIAL](https://nyelidl.github.io/docking_workshop/)**
+
+🌐 https://nyelidl.github.io/docking_workshop/
+
+---
+
 ## 🖥️ Run Streamlit locally
 
 The local app uses the deterministic heuristic pKaNET backend.
