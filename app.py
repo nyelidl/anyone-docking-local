@@ -176,7 +176,7 @@ def _prolif_profile_table_html(profile_rows, residue_columns) -> str:
 
     return (
         '<div style="padding:10px 0 6px 0;color:#111;font-size:12px;">'
-        'Hover a colored cell to see interaction type(s). Black = no interaction.'
+        'Hover a colored cell to see interaction type(s). White = no interaction.'
         '</div>'
         '<div style="overflow:auto;border:1px solid #666;border-radius:8px;background:#fff;">'
         '<table style="border-collapse:collapse;width:max-content;min-width:100%;table-layout:fixed;">'
@@ -1126,7 +1126,7 @@ def _render_interactive_diagram(data: dict, height: int = 800) -> str:
         "hbond": "H-bond", "hbond_to_halogen": "H···Halogen",
         "pi_pi": "π-π", "cation_pi": "Cation-π",
         "hydrophobic": "Hydrophobic", "ionic": "Ionic",
-        "metal": "Metal", "halogen": "Halogen",
+        "metal": "Metal contact (distance-based; geometry not scored)", "halogen": "Halogen",
     }
     legend_items = []
     for it in active_types:
@@ -1738,16 +1738,72 @@ _OBABEL_OK, _OBABEL_VER   = _cached_obabel()
 # ══════════════════════════════════════════════════════════════════════════════
 
 def show3d(view, height=480):
-    try:
-        from stmol import showmol
-        showmol(view, height=height)
-    except ImportError:
-        raw  = view._make_html()
-        resp = _re.sub(r'(width\s*[:=]\s*)["\']?\d+px?["\']?', r'\g<1>100%', raw)
-        components.html(
-            f'<div style="width:100%;overflow:hidden">{resp}</div>',
-            height=height, scrolling=False,
-        )
+    """Render a responsive viewer and resize after its expander becomes visible."""
+    height = int(height)
+    raw = view._make_html()
+    bundle_path = Path(__file__).with_name("3Dmol-min.js")
+    if not bundle_path.is_file():
+        st.error("The 3D renderer file is missing. Deploy 3Dmol-min.js alongside app.py.")
+        return
+    library = bundle_path.read_text(encoding="utf-8").replace("</script", "<\\/script")
+    # Load the bundled library in the iframe before py3Dmol creates its viewer.
+    raw, replaced = _re.subn(
+        r"if\s*\(typeof \$3Dmolpromise === 'undefined'\)\s*\{.*?\n\}",
+        "var $3Dmolpromise = Promise.resolve();", raw, count=1, flags=_re.S,
+    )
+    if replaced != 1:
+        st.error("The installed py3Dmol HTML format is unsupported. Update the app and py3Dmol together.")
+        return
+    raw = raw.replace("$3Dmolpromise.then(function() {",
+                      "$3Dmolpromise = $3Dmolpromise.then(function() {")
+    raw = "<script>" + library + "</script>" + raw
+    layout = f'''<style>
+html, body {{ margin:0; width:100%; height:{height}px; overflow:hidden; }}
+div[id^="3dmolviewer_"] {{ width:100%!important; height:{height}px!important; }}
+#acd-viewer-error {{ position:absolute; inset:12px; padding:12px; background:#fff4e5;
+    color:#663c00; font:14px sans-serif; z-index:10; }}
+</style>'''
+    lifecycle = '''<script>
+(function () {
+    const container = document.querySelector('div[id^="3dmolviewer_"]');
+    if (!container) return;
+    const viewerName = container.id.replace('3dmolviewer_', 'viewer_');
+    let ready = false;
+    function showError(error) {
+        if (ready || document.getElementById('acd-viewer-error')) return;
+        const notice = document.createElement('div');
+        notice.id = 'acd-viewer-error';
+        notice.setAttribute('role', 'alert');
+        notice.textContent = error && error.message
+            ? '3D viewer initialization failed: ' + error.message
+            : '3D viewer initialization has not completed. Reopen this panel or reload the app.';
+        document.body.appendChild(notice);
+    }
+    function resizeViewer() {
+        const viewer = window[viewerName];
+        if (!viewer || container.clientWidth === 0) return;
+        try {
+            viewer.resize();
+            viewer.render();
+            ready = true;
+            const notice = document.getElementById('acd-viewer-error');
+            if (notice) notice.remove();
+        } catch (error) {
+            console.error('ACD 3D viewer:', error);
+            showError();
+        }
+    }
+    new ResizeObserver(resizeViewer).observe(container);
+    window.addEventListener('resize', resizeViewer);
+    if (window.$3Dmolpromise) {
+        window.$3Dmolpromise.then(function () {
+            requestAnimationFrame(resizeViewer);
+        }).catch(showError);
+    }
+    setTimeout(function () { resizeViewer(); showError(); }, 15000);
+})();
+</script>'''
+    components.html(layout + raw + lifecycle, height=height, scrolling=False)
 
 def _add_box_to_view(view, cx, cy, cz, sx, sy, sz):
     try:
@@ -1899,7 +1955,7 @@ _LEGEND_FULL = """
       <span>ionic interaction</span></div>
     <div style="display:flex;align-items:center;gap:10px;white-space:nowrap;">
       <svg width="48" height="14"><line x1="0" y1="7" x2="48" y2="7" stroke="#F5C400" stroke-width="2" stroke-dasharray="5,3"/></svg>
-      <span>metal interaction</span></div>
+      <span>Metal contact (distance-based; geometry not scored)</span></div>
   </div>
   <div style="display:flex;align-items:center;gap:40px;">
     <div style="display:flex;align-items:center;gap:10px;white-space:nowrap;">
@@ -4135,6 +4191,7 @@ def _render_receptor_setup(receptor_pdb, box_pdb, ligand_pdb, center, size):
         _rec_path = receptor_pdb
         if _rec_path and os.path.exists(_rec_path):
             v3.addModel(open(_rec_path).read(), "pdb")
+            # Per-residue cartoon opacity splits can break 3Dmol's spline renderer.
             v3.setStyle({"model": mi}, {"cartoon": {"color": "spectrum", "opacity": 0.4}})
             try:
                 from prody import parsePDB as _pPDB
@@ -4151,7 +4208,7 @@ def _render_receptor_setup(receptor_pdb, box_pdb, ligand_pdb, center, size):
                     v3.setStyle(
                         {"model": mi, "resi": _resi_list},
                         {"stick": {"colorscheme": "whiteCarbon", "radius": 0.18},
-                         "cartoon": {"color": "spectrum", "opacity": 0.75}},
+                         "cartoon": {"color": "spectrum", "opacity": 0.4}},
                     )
             except Exception:
                 pass
@@ -4168,7 +4225,7 @@ def _render_receptor_setup(receptor_pdb, box_pdb, ligand_pdb, center, size):
                                 {"model": 0, "chain": "" if _chain == "_" else _chain,
                                  "resi": int(_match[1]), "icode": _match[2] or ["", " "]},
                                 {"stick": {"color": "#FFD600", "radius": 0.25},
-                                 "cartoon": {"color": "spectrum", "opacity": 0.75}},
+                                 "cartoon": {"color": "spectrum", "opacity": 0.4}},
                             )
             mi += 1
 
@@ -4989,10 +5046,34 @@ st.markdown('<hr class="step-divider">', unsafe_allow_html=True)
 #  TABS
 # ══════════════════════════════════════════════════════════════════════════════
 # One receptor preparation for all modes. Mode tabs contain only ligand/docking/results controls.
+
+# Reporting uses the shared core; widget state remains local to each session.
+import core as _report_core
+_raw_reporting_vina = run_vina
+def run_vina(*args, **kwargs):
+    kwargs.setdefault("replicate_seeds", int(st.session_state.get("replicate_seeds", 1)))
+    kwargs.setdefault("crystal_pdb", st.session_state.get("ligand_pdb_path") or st.session_state.get("b_ligand_pdb_path"))
+    ligand_path = kwargs.get("ligand_pdbqt") or (args[1] if len(args) > 1 else None)
+    kwargs.setdefault("smiles", st.session_state.get("prepared_reporting_smiles", {}).get(str(ligand_path)))
+    result = _raw_reporting_vina(*args, **kwargs)
+    st.session_state.setdefault("docking_reports", []).append(result)
+    return result
+_raw_reporting_prepare = prepare_ligand
+def prepare_ligand(*args, **kwargs):
+    kwargs.setdefault("receptor_path", st.session_state.get("receptor_pdbqt") or st.session_state.get("b_receptor_pdbqt"))
+    result = _raw_reporting_prepare(*args, **kwargs)
+    if result.get("success"):
+        st.session_state.setdefault("prepared_reporting_smiles", {})[str(result.get("pdbqt"))] = result.get("prot_smiles")
+    for candidate in result.get("metal_microstate_candidates", []):
+        st.info(candidate["note"])
+        st.code(candidate["smiles"], language="text")
+    return result
+
 _SHARED_RECEPTOR_DIR = WORKDIR / "shared_receptor"
 _SHARED_RECEPTOR_DIR.mkdir(exist_ok=True)
 st.caption("Prepare once, then choose Single Dock, Batch Dock, Co-Dock or Redock below. Flexible side chains are selected here.")
 _receptor_section(pfx="shared_", wdir=_SHARED_RECEPTOR_DIR, step_label="Step 1 — Shared receptor preparation")
+st.number_input("Replicate seeds (1 = off)", min_value=1, max_value=10, value=1, step=1, key="replicate_seeds", help="Repeated searches multiply shared-server usage.")
 import core as _shared_core
 from shared_receptor import sync as _sync_shared_receptor, show_redock_status as _shared_redock_status
 _shared_status = _sync_shared_receptor(st.session_state, _shared_core, WORKDIR)
@@ -5516,7 +5597,7 @@ with tab_basic:
     cd1, cd2 = st.columns([1.5, 1])
     with cd1:
         exh = st.slider(
-            "Exhaustiveness", 4, 64, 16, 2, key="exh_slider",
+            "Exhaustiveness", 4, 64, 8, 2, key="exh_slider",
             help=(
                 "Search thoroughness — higher = more reliable, slower.\n\n"
                 "📖 Controls number of Monte Carlo steps Vina performs.\n"
@@ -5568,13 +5649,13 @@ with tab_basic:
             )
         _dock_seed = vina_seed if vina_seed != 0 else None
     with cd2:
-        est = max(1, exh // 8)
         st.markdown(
             f'<div style="background:var(--bg-subtle);border:1px solid var(--border);'
             f'border-radius:8px;padding:16px;">'
             f'<div style="color:var(--text-muted);font-size:0.8rem">ESTIMATED TIME</div>'
             f'<div style="font-family:\'IBM Plex Mono\',monospace;font-size:2rem;'
-            f'color:var(--warn)">~{est}&#8211;{est*3} min</div>'
+            f'color:var(--warn)">Typically 2–6 min</div>'
+            f'<div style="color:var(--text-muted);font-size:0.8rem;margin-top:6px;">Noted: actual runtime depends on system size, sampling parameters, and current server load.</div>'
             f'<div style="color:var(--text-muted);font-size:0.8rem">'
             f'exhaustiveness = {exh}</div>'
             f'</div>',
@@ -6923,6 +7004,14 @@ with tab_batch:
         with c_zip:
             zb = io.BytesIO()
             with zipfile.ZipFile(zb, "w", zipfile.ZIP_DEFLATED) as zf:
+                for report_index, report in enumerate(st.session_state.get("docking_reports", [])):
+                    report_path = report.get("summary_file")
+                    if report_path and Path(report_path).is_file():
+                        zf.write(report_path, f"summaries/run_{report_index}.txt")
+                    for seed_index, seed_report in enumerate(report.get("replicate_summary", {}).get("runs", [])):
+                        seed_path = seed_report.get("summary_file")
+                        if seed_path and Path(seed_path).is_file():
+                            zf.write(seed_path, f"summaries/run_{report_index}_seed{seed_index+1}.txt")
                 for r in ([redock_result] if redock_result else []) + ok_results:
                     sn = r["Name"].replace("⭐ ", "").replace(" (co-crystal ref)", "")
                     for src_path, arc in [
@@ -7078,3 +7167,20 @@ st.markdown(
     '</div>',
     unsafe_allow_html=True,
 )
+
+# Persist scientific notices on results reruns and make the same report downloadable.
+if st.session_state.get("docking_reports"):
+    with st.expander("Metal contacts and replicate RMSD reports", expanded=True):
+        for _report_index, _report in enumerate(st.session_state["docking_reports"]):
+            for _warning in _report.get("warnings", []):
+                st.warning(_warning)
+            _summary = _report.get("replicate_summary")
+            if _summary:
+                st.json(_summary)
+                for _seed_report in _summary["runs"]:
+                    for _warning in _seed_report.get("warnings", []):
+                        st.warning(_warning)
+            _report_path = _report.get("summary_file")
+            if _report_path and Path(_report_path).is_file():
+                st.download_button("Scientific report", Path(_report_path).read_bytes(),
+                    file_name=Path(_report_path).name, key=f"scientific_report_{_report_index}")
