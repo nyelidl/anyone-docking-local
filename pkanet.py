@@ -18,7 +18,7 @@ from rdkit.Chem import AllChem, rdMolDescriptors
 from rdkit.Chem.EnumerateStereoisomers import EnumerateStereoisomers, StereoEnumerationOptions
 from rdkit.Chem.MolStandardize import rdMolStandardize
 
-__version__ = "81"
+__version__ = "82"
 __identity_patch__ = "2026-11-14"
 
 # ─────────────────────────────────────────────────────────────────────────────
